@@ -1,0 +1,20 @@
+*.gb
+*.map
+*.noi
+*.o
+*.lst
+*.sym
+*.ihx
+*.asm
+*.adb
+*.cdb
+*.sav
+*.ram
+tests/test_sim
+.DS_Store
+
+# Editor / agent scratch
+.claude/
+CLAUDE.md
+.venv/
+__pycache__/
