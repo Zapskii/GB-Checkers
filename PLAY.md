@@ -3,10 +3,12 @@
 English draughts (checkers) for the Game Boy — the board game, the standard
 rules, with an opponent built in.
 
-`draughts.gb` is the whole game. Load it in an emulator, or flash it to a
-cartridge, and it runs on an original Game Boy, a Game Boy Color, or any
-emulator. On a Super Game Boy the board is framed by a decorative border; on a
-plain Game Boy you just get the board.
+The whole game is one file. Build it as `draughts.gb`, or grab it from the
+[releases page](https://github.com/Zapskii/GB-Checkers/releases), where it is
+named after the version - `gb-draughts-0.1-beta.gb` today. Load it in an
+emulator, or flash it to a cartridge, and it runs on an original Game Boy, a
+Game Boy Color, or any emulator. On a Super Game Boy the board is framed by a
+decorative border; on a plain Game Boy you just get the board.
 
 ## Controls
 

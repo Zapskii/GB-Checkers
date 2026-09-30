@@ -6,8 +6,10 @@ Python script, and hardware-independent logic in a `sim.h` that's tested
 on the host before anything touches GBDK.
 
 **Just want to play it? [PLAY.md](PLAY.md) is the player's guide** - controls,
-rules, the machine and the undo key. Everything below this line is the build and
-the internals.
+rules, the machine and the undo key. The ROM is a
+[release asset](https://github.com/Zapskii/GB-Checkers/releases) - download it
+and load it in an emulator, or flash it to a cartridge. Everything below this
+line is the build and the internals.
 
 **Current stage: Milestone 3 complete.** Milestone 1
 is complete: a full two-player pass-and-play game with title screen, board and
