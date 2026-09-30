@@ -23,6 +23,15 @@ headless emulator and asserts on what it did.
 | A      | pick up the piece under the cursor; press again to play the move. Picking up *seats* the cursor on a landing square, so the second press always has somewhere to go |
 | B      | put a picked-up piece back down; on a finished game, new game |
 
+## Sound
+
+A hop clicks (CH1), a capture adds a thud underneath it (CH2), and a hop that
+crowns a man adds a crash (CH4) - so a capturing promotion plays two at once,
+on two different channels. All three fire from `play()`, the one path both
+sides' moves go through, so the machine's replies sound exactly like yours.
+Every envelope decays to silence on its own, so nothing ever has to switch a
+channel off afterwards.
+
 ## 1 player
 
 The machine is always white, so the human always opens - black moves first. Its
@@ -104,7 +113,8 @@ piece blocked. The status row says who won and START (or B) starts a new game.
   this scope, and worth stating rather than leaving to be discovered.
 - Save/load to cartridge SRAM (needs a battery-backed MBC - a hardware/BOM
   decision, not just a code change).
-- SGB border and sound.
+- An SGB border, and a win jingle. The moves themselves already make their
+  three noises.
 
 ## Build
 
