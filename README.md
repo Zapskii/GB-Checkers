@@ -5,13 +5,20 @@ with no game engine. Same lineage as GB-Protector: procedural art via a
 Python script, and hardware-independent logic in a `sim.h` that's tested
 on the host before anything touches GBDK.
 
-**Current stage: Milestone 2 complete.** Milestone 1
+**Just want to play it? [PLAY.md](PLAY.md) is the player's guide** - controls,
+rules, the machine and the undo key. Everything below this line is the build and
+the internals.
+
+**Current stage: Milestone 3 complete.** Milestone 1
 is complete: a full two-player pass-and-play game with title screen, board and
 cursor, mandatory capture, multi-jump chains, promotion, win detection and
-restart. Milestone 2 adds an opponent: the title screen opens on **1 PLAYER**,
-and the machine plays white, the human black, with the moves making their own
-noises and the pieces gliding from square to square - see
-[Animation](#animation). SELECT takes a turn back - see [Undo](#undo). `make`
+restart. Milestone 2 adds an opponent: the machine plays white, the human
+black, and the moves make their own noises. Milestone 3 makes **1 PLAYER** the
+boot default, lets the pieces glide from square to square - see
+[Animation](#animation) - and lets SELECT take a turn back - see [Undo](#undo).
+On a Super Game Boy the board is framed by the game's own border, drawn for it
+rather than ported from a sibling - see [Super Game Boy](#super-game-boy).
+`make`
 builds the ROM, `make test` runs
 the rules engine's unit tests on the host, and `make probe` drives the ROM in a
 headless emulator and asserts on what it did.
@@ -159,7 +166,8 @@ point.
 
 The border is a generated file, like `gfx.h`: edit `tools/mkborder.py` and run
 `make border`. Its lettering is not a second font - the script parses the 5x7
-glyphs out of `mkgfx.py`, so the border says GB DRAUGHTS in the same hand as the
+glyphs out of `mkgfx.py`, so the border says DRAUGHTS across the top and
+CHECKERS across the bottom in the same hand as the
 status row, and the discs are the board's own shape (outline, body, groove ring,
 and a cross for kings).
 
@@ -232,15 +240,15 @@ list the statics the probe reads), so if you want the release binary, run
 | Bank    | Size  | Used        | Free        |
 |---------|-------|-------------|-------------|
 | ROM_0   | 16384 | 11777 (72%) | 4607 (28%)  |
-| ROM_1   | 16384 | 5312 (32%)  | 11072 (68%) |
+| ROM_1   | 16384 | 5152 (31%)  | 11232 (69%) |
 | WRAM_LO | 4096  | 1974 (48%)  | 2122 (52%)  |
 
 The AI is most of the WRAM: its search arena is `AI_MAX_PLY` `AiFrame`s, about a
 kilobyte, held at file scope in `main.c` rather than on the stack - a kilobyte of
 stack on a DMG is not "large", it is a crash.
 
-The SGB border's blobs are most of bank 1. They are 3488 bytes of tiles, 1792 of
-map and 32 of palettes - 5312 in all - and they sit at 0x4000
+The SGB border's blobs are most of bank 1. They are 3328 bytes of tiles, 1792 of
+map and 32 of palettes - 5152 in all - and they sit at 0x4000
 and above, placed there by `#pragma bank 1` in `border_data.c` (which `make
 border` writes, via `png2asset -b 1`) and the `-Wl-b_CODE_1=0x4000` area in
 `LCCFLAGS`. The cart is ROM-only, so bank 1 is permanently mapped across
@@ -252,7 +260,8 @@ substantial from here - link cable play - can take the same route.
 Drawing this game's own border, rather than shipping the one ported from
 GB-Protector at P13, took the tile blob from 185 tiles (5920 bytes) to 109
 (3488) - a smaller picture, because flat shapes on an 8-pixel grid repeat where
-a starfield does not. That is 2432 bytes back.
+a starfield does not. That is 2432 bytes back. Giving the bottom edge to the
+wordmark CHECKERS, in place of a row of men, took it to 104 (3328).
 
 Neither the glide (P17, 1352 bytes of bank 0: 256 of sprite art and the rest
 code) nor undo (P16, 416 bytes of WRAM) needed the banking. Bank 0 has 4607

@@ -57,8 +57,8 @@ def read_font():
     """The game's own 5x7 glyphs, straight out of mkgfx.py.
 
     FONT maps a character to seven 5-bit rows.  Parsing rather than copying
-    means the border says 'GB DRAUGHTS' in exactly the letters the board's
-    status row does, and follows if the font ever grows.
+    means the border says 'DRAUGHTS' and 'CHECKERS' in exactly the letters the
+    board's status row does, and follows if the font ever grows.
     """
     src = open(MKGFX).read()
     body = re.search(r'^FONT = \{(.*?)^\}', src, re.S | re.M).group(1)
@@ -120,8 +120,9 @@ def main():
     d.rectangle([39, 31, 216, 192], outline=EDGE)
     d.rectangle([WIN[0] - 1, WIN[1] - 1, WIN[2], WIN[3]], outline=BEZEL_IN)
 
-    # The pieces, on a 32px pitch: a man at each end of the side columns, a row
-    # along the bottom, and a crowned king at every corner.
+    # The pieces, on a 32px pitch: a man at each end of the side columns, and a
+    # crowned king at every corner.  No bottom row of men -- the wordmark has
+    # that strip, since there are only 32px of border under the window.
     n = 0
     for cx in (20, 236):
         for cy in (20, 204):
@@ -130,14 +131,12 @@ def main():
         for cy in range(52, 181, 32):
             disc(d, cx, cy, n % 2 == 0, False)
             n += 1
-    for cx in range(68, 197, 32):
-        disc(d, cx, 204, n % 2 == 0, False)
-        n += 1
 
-    # "GB DRAUGHTS" at 2x, centred, with a rule and the byline under it: the
+    # "DRAUGHTS" at 2x, centred, with a rule and the byline under it: the
     # title is 2x and the credit 1x, so the name reads as a caption rather than
-    # as a second title.
-    text = "GB DRAUGHTS"
+    # as a second title.  The game's other name sits at the bottom at the same
+    # weight, so the two edges balance.
+    text = "DRAUGHTS"
     scale = 2
     tw = len(text) * 6 * scale - scale
     tx = (W - tw) // 2
@@ -147,6 +146,10 @@ def main():
     credit = "BY ZAPSKI"
     cw = len(credit) * 6 - 1
     draw_text(d, font, (W - cw) // 2, 24, credit, 1, SUBTLE)
+
+    other = "CHECKERS"
+    ow = len(other) * 6 * scale - scale
+    draw_text(d, font, (W - ow) // 2, 200, other, scale, TITLE)
 
     # The game window: the SGB shows the GB screen here, so it stays empty.
     d.rectangle([WIN[0], WIN[1], WIN[2] - 1, WIN[3] - 1], fill=(0, 0, 0, 0))
