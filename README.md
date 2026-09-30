@@ -38,8 +38,11 @@ channel off afterwards.
 The machine is always white, so the human always opens - black moves first. Its
 turn is a blocking one: the status row says **THINKING**, the screen is blitted
 with that line *before* the search starts, and the loop is frozen for as long as
-the search takes. On the current build that is a few seconds at the start
-position; P11 measures it properly and pins the worst case. Because the think is
+the search takes. **Measured** (P11, worst of the positions tried, in emulator
+frames of 16.7 ms): 177 at the start position (3.0 s), **384 on a busy twelve-piece
+midgame (6.4 s, the worst case)**, 82 with four pieces left (1.4 s). `make probe`
+fails the build if any position overruns the 600-frame budget that pins that
+worst case. Because the think is
 blocking, START and B pressed during it are dropped - the game restarts a moment
 later instead of not at all.
 
