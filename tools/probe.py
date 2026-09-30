@@ -1546,7 +1546,7 @@ def set_byte(g, name, val):
     g.p.memory[a:a + 1] = bytes([val])
 
 
-def force_position(g, black, white, kings, side):
+def force_position(g, black, white, kings, side, settle=6):
     """Put a whole position into main.c's statics, at a turn start.
 
     A midgame position with the MACHINE to move cannot be played into and cannot
@@ -1554,13 +1554,17 @@ def force_position(g, black, white, kings, side):
     as the move before it, so there is no frame between them to look at.  So the
     board goes straight into WRAM - the trick p4/p5/p6 already use - widened
     here to every static a turn boundary parks, so the position is a real turn
-    start and not half of one."""
+    start and not half of one.
+
+    `settle` is the frames to let the write take: the default is enough to see
+    the position on screen, and P11 passes 0 because every one of those frames
+    is a frame of the think it is timing."""
     a = g.addr["board"]
     g.p.memory[a:a + 12] = board_bytes(black, white, kings)
     for name, val in (("side", side), ("sel", NO_SQ), ("cursor", NO_SQ),
                       ("chain_sq", NO_SQ), ("state", ST_SELECT)):
         set_byte(g, name, val)
-    g.run(6)
+    g.run(settle)
 
 
 def await_reply(g, limit=900, step=10):
@@ -1762,6 +1766,160 @@ def p10_ai_opponent(g):
           "and the screen is that board - 23 men and the square it left bare")
 
 
+# --------------------------------------------------------------- P11 -------
+# The think budget, in EMULATOR FRAMES - the number the player waits.  600
+# frames is ~10 s of DMG time (a frame is 16.7 ms), which is the cost of the
+# deepest search that does not leave the machine sitting on a still screen for
+# long enough to look hung.  THINKING is blitted BEFORE the search and stays up
+# for all of it, so the player is never looking at a frozen board.
+THINK_BUDGET = 600
+
+# The depth main.c is built at (AI_DEPTH / the ai_depth symbol), and the number
+# main.c's AI_DEPTH comment records.  Held to the ROM under test because a
+# budget check is a claim about ONE depth: on a shallower build it would pass
+# with nothing measured.
+MEASURED_DEPTH = 2
+
+# The three positions the depth table was measured at, one per game phase, and
+# the WORST draw of each phase rather than a typical one.  Cost is driven by
+# branching - white has 12 moves in the midgame below against 7 at the start -
+# and a think that fits at the start position while a 12-piece midgame runs
+# four times as long is a frozen game exactly when the player has the most to
+# look at.  The other draws measured (two midgames, one endgame), and every
+# depth, are in that same table in main.c.
+THINK_POSITIONS = [
+    ("opening (the start)",  (BLACK_START, WHITE_START, 0)),
+    ("midgame, 12 pieces",   (0x02384004, 0x2440A400, 0x0000A000)),
+    ("endgame, 4 pieces",    (0x09000000, 0x00004040, 0x00000040)),
+]
+
+
+def decode_tile(t):
+    """glyph()'s inverse: a tile id back to the character it draws."""
+    if t == T_BLANK:
+        return " "
+    if T_DIGIT0 <= t < T_DIGIT0 + 10:
+        return chr(ord("0") + t - T_DIGIT0)
+    if T_LETTER0 <= t < T_LETTER0 + 26:
+        return chr(ord("A") + t - T_LETTER0)
+    return "."
+
+
+def screen_rows(g, nrows=18):
+    """The visible tilemap as text, one row per line.
+
+    One slice read rather than find_text()'s tile-by-tile scan: this runs once
+    per emulated frame of a think, and 576 individual reads per frame is the
+    difference between a check that takes a second and one that takes a minute."""
+    raw = bytes(g.p.memory[MAP0:MAP0 + MAP_W * nrows])
+    return ["".join(decode_tile(t) for t in raw[y * MAP_W:(y + 1) * MAP_W])
+            for y in range(nrows)]
+
+
+def shows(g, s):
+    return any(s in row for row in screen_rows(g))
+
+
+def think_frames(g, cap):
+    """Emulator frames from here until the machine has replied.
+
+    One tick at a time, counted here - NOT the game's own `frame` counter, which
+    is the trap this phase is about.  `frame` advances once per turn of the main
+    loop and the think is a blocking call inside one of those turns, so across a
+    900-frame think `frame` advances by ONE: a check written on it would read
+    every depth as instantaneous and pass on all of them.
+
+    Returns (frames spent, the last frame THINKING was on the screen, replied).
+    `cap` is the budget: past it there is nothing left to learn, and stopping
+    means an over-budget depth is caught in 600 frames instead of however many
+    thousand it would have taken to finish."""
+    n, seen = 0, 0
+    while n < cap:
+        g.p.tick(1, True)
+        n += 1
+        if shows(g, "THINKING"):
+            seen = n
+        if g.var("side") == SIDE_BLACK:
+            return n, seen, True
+    return n, 0, False
+
+
+def p11_think_budget(g):
+    """The machine's worst think fits the budget the depth was chosen for.
+
+    The whole phase in one check: a depth picked by measurement is only worth
+    anything if the ROM can be held to it, and the number that matters is the
+    WORST case, not the average - a think that fits at the start position and
+    runs for six seconds out of a 12-piece midgame is a frozen game exactly
+    when the player has the most to look at.
+    """
+    print("P11 think budget")
+    g.run(150)
+    if not g.need("frame", "side", "board", "state", "sel", "cursor",
+                  "chain_sq", "mode_1p", "ai_depth"):
+        return
+    check(g.var("ai_depth") == MEASURED_DEPTH,
+          "the ROM was built at the measured depth (%d) and not some other - "
+          "this is the depth the budget below was measured for (%d)"
+          % (MEASURED_DEPTH, g.var("ai_depth")))
+
+    set_byte(g, "mode_1p", MODE_1P)
+    set_byte(g, "state", ST_SELECT)
+    g.run(10)
+
+    for label, pre in THINK_POSITIONS:
+        force_position(g, pre[0], pre[1], pre[2], SIDE_WHITE, settle=0)
+        f0 = g.var("frame")
+        n, seen, replied = think_frames(g, THINK_BUDGET)
+        stall = (g.var("frame") - f0) & 255
+
+        # Nothing below can be trusted once the cap is hit: the emulator is
+        # still inside the search, `side` is white for as long as it lasts, and
+        # the next position's write would be swallowed by it.  So a blown
+        # budget ends the check here, with the one assertion that says why.
+        check(replied,
+              "%s: the machine replied inside the budget - still searching "
+              "after %d emulator frames (%.1f s)"
+              % (label, n, n / 59.7))
+        if not replied:
+            return
+
+        check(n <= THINK_BUDGET,
+              "%s: the think cost %d emulator frames (%.2f s), inside the %d "
+              "budget" % (label, n, n / 59.7, THINK_BUDGET))
+        print("     %s: %d frames (%.2f s)" % (label, n, n / 59.7))
+        # The think is a blocking call inside ONE turn of the main loop, which
+        # is why it cannot be timed with `frame`: at most a turn or two of the
+        # loop happens across the whole search, however long that is.
+        check(stall <= 4,
+              "%s: and it was one blocked turn of the loop, not a slow one "
+              "(`frame` advanced %d across %d frames)" % (label, stall, n))
+        # THINKING is blitted before the search and stays up for it: the frame
+        # it stops being drawn on is the frame the answer is already in, so it
+        # covers the whole wait bar the one or two frames the blit itself takes.
+        check(seen >= n // 2 and seen > 0,
+              "%s: THINKING was on the screen through the think (%d of %d "
+              "frames)" % (label, seen, n))
+
+        post = board_masks(g)
+        allowed = gen_moves(pre[0], pre[1], pre[2], SIDE_WHITE)
+        matched = [m for m in allowed if apply_move(*pre, m) == post]
+        check(len(matched) == 1,
+              "%s: and the reply is one of white's legal moves - %s -> %s"
+              % (label, maskstr(pre), maskstr(post)))
+        check(g.var("side") == SIDE_BLACK and g.var("state") != ST_OVER,
+              "%s: black is to move again in a live game (%d, state %d)"
+              % (label, g.var("side"), g.var("state")))
+        # `side` flips inside play(), in the middle of the reply's turn of the
+        # loop -- the rebuild and blit that take THINKING back off the screen
+        # are still to come, and they cost several emulator frames.  So the
+        # settle is measured in the loop's own pace, not in one frame.
+        g.run(30)
+        check(not shows(g, "THINKING"),
+              "%s: and THINKING is off the screen once the move is played"
+              % (label,))
+
+
 CHECKS = [("p1_boot_title_board", p1_boot_title_board),
           ("p2_start_position", p2_start_position),
           ("p3_select_and_highlight", p3_select_and_highlight),
@@ -1772,7 +1930,8 @@ CHECKS = [("p1_boot_title_board", p1_boot_title_board),
           ("p6_win_and_restart", p6_win_and_restart),
           ("p7_responsiveness", p7_responsiveness),
           ("p8_one_step_per_tap", p8_one_step_per_tap),
-          ("p10_ai_opponent", p10_ai_opponent)]
+          ("p10_ai_opponent", p10_ai_opponent),
+          ("p11_think_budget", p11_think_budget)]
 
 
 def main(rom, mapfile):

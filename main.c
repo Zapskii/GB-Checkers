@@ -111,15 +111,37 @@ static uint8_t hudbuf[HUD_TW * HUD_TH];
  * like everything else. */
 static uint8_t mode_1p;
 
-/* How deep the machine searches, in plies.  PROVISIONAL: P11 measures the
- * worst-case think in emulator frames and replaces this number with the largest
- * one that fits the budget.  Measured by hand on this build at the start
- * position - white's reply to black's first move, one emulator frame being
- * 16.7 ms - the think costs ~55 frames at depth 1, ~300 at depth 2 and ~905 at
- * depth 3.  2 is the deepest that is plausibly inside P11's 600-frame budget;
- * P11 owns the number.  The search is a blocking call, so an over-optimistic
- * value here is a frozen screen, not a merely slow one. */
+/* How deep the machine searches, in plies.  MEASURED, not guessed - P11
+ * (tools/probe.py's p11_think_budget, which walks the same three positions):
+ *
+ *   position                     depth 2   depth 3   depth 4
+ *   opening (the start)            177      1395      4236
+ *   midgame, 12 pieces             384      1046      2712
+ *   endgame, 4 pieces               80       304       317
+ *
+ * The numbers are EMULATOR FRAMES (16.7 ms each) of the whole think, worst of
+ * the fuzz draws tried, on the SDCC build.  The budget is 600 frames; the
+ * worst think at depth 2 is 384 (6.4 s), at depth 3 it is 1395 (23 s), so 2 is
+ * the largest depth that fits and this stays where P10 left it - now for a
+ * measured reason instead of a guessed one.  Two things about the shape of the
+ * table: cost is not monotone in pieces (the start position has 24 of them but
+ * only 7 moves each, and it is the WORST position of all once the search is
+ * deep enough to run out of alpha-beta cutoffs), and one ply is not a fixed
+ * multiplier (a deeper search prunes differently; midgame1 is 861 at depth 3
+ * and 804 at depth 4).
+ *
+ * The search is a blocking call, so an over-optimistic value here is a frozen
+ * screen, not a merely slow one.  The check fails on a budget overrun rather
+ * than on this number, so raising it means re-measuring. */
 #define AI_DEPTH 2u
+
+/* The depth the machine actually searches, as a SYMBOL rather than the macro
+ * alone.  "The worst think fits the budget" is a claim about one depth, so the
+ * ROM has to be able to say which one it was built at: P11's budget check reads
+ * this out of the linker map and holds it to the measured number above, so a
+ * build that has drifted off its measurement fails the check that was measured
+ * for it instead of passing quietly on a shallower search. */
+static uint8_t ai_depth = AI_DEPTH;
 
 /* P9's search arena, one frame per ply.  FILE SCOPE, and that is load-bearing:
  * AI_MAX_PLY * sizeof(AiFrame) is about a kilobyte, and on the DMG's stack that
@@ -722,7 +744,7 @@ static void ai_turn(void)
          * gone.  A hop off the list the screen is already showing is what the
          * human's path does too. */
         if (n_moves) m = moves[0];
-    } else if (search_best(board, SIDE_WHITE, AI_DEPTH, arena, &m) <= -AI_WIN_SCORE) {
+    } else if (search_best(board, SIDE_WHITE, ai_depth, arena, &m) <= -AI_WIN_SCORE) {
         m.from = NO_SQ;                 /* no move to report: nothing to play */
     }
 
