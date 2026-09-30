@@ -111,8 +111,13 @@ static uint8_t hudbuf[HUD_TW * HUD_TH];
  * the title screen - the only place it can change, so a game never swaps
  * opponent halfway through.  It is part of what the screen is built from (the
  * title says which mode you are about to start), so screen_stale() watches it
- * like everything else. */
-static uint8_t mode_1p;
+ * like everything else.
+ *
+ * The initialiser is the boot default, and it is 1 PLAYER: the game a player
+ * gets without touching SELECT is the one with an opponent.  Black still moves
+ * first, so in 1 PLAYER the human still opens - only the machine's reply is
+ * new.  SELECT on the title is the only thing that ever clears it. */
+static uint8_t mode_1p = 1u;
 
 /* How deep the machine searches, in plies.  MEASURED, not guessed - P11
  * (tools/probe.py's p11_think_budget, which walks the same three positions):

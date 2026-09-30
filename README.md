@@ -8,8 +8,8 @@ on the host before anything touches GBDK.
 **Current stage: Milestone 2 complete.** Milestone 1
 is complete: a full two-player pass-and-play game with title screen, board and
 cursor, mandatory capture, multi-jump chains, promotion, win detection and
-restart. Milestone 2 adds an opponent: pick **1 PLAYER** on the title screen and
-the machine plays white, the human black, with the moves making their own
+restart. Milestone 2 adds an opponent: the title screen opens on **1 PLAYER**,
+and the machine plays white, the human black, with the moves making their own
 noises. `make` builds the ROM, `make test` runs
 the rules engine's unit tests on the host, and `make probe` drives the ROM in a
 headless emulator and asserts on what it did.
@@ -18,7 +18,7 @@ headless emulator and asserts on what it did.
 
 | Button | What it does |
 |--------|--------------|
-| SELECT | on the title screen, switch between **2 PLAYERS** and **1 PLAYER** |
+| SELECT | on the title screen, switch between **1 PLAYER** (the default) and **2 PLAYERS** |
 | START  | new game - from the title screen, and from a finished game |
 | d-pad  | move the cursor. Before a piece is picked up it walks square to square along the diagonals, resting only on squares you can actually use. Once a piece is up it cycles that piece's landing squares, one per press (hold to repeat) |
 | A      | pick up the piece under the cursor; press again to play the move. Picking up *seats* the cursor on a landing square, so the second press always has somewhere to go |
@@ -35,6 +35,9 @@ channel off afterwards.
 
 ## 1 player
 
+**This is what the game boots into** - a new cartridge with nobody touching the
+controls gets an opponent, not a second chair. SELECT on the title screen is
+the only thing that changes it, and the title line says which one is coming.
 The machine is always white, so the human always opens - black moves first. Its
 turn is a blocking one: the status row says **THINKING**, the screen is blitted
 with that line *before* the search starts, and the loop is frozen for as long as

@@ -191,8 +191,27 @@ class Game:
 
     def start(self, boot=150, settle=30):
         """PyBoy swallows input for several ticks after its own boot splash, so
-        START is held 20 frames rather than tapped."""
+        START is held 20 frames rather than tapped.
+
+        P14 made 1 PLAYER the boot default, which turned this single START into
+        the whole 2-player blast radius: eleven of the checks below come through
+        here, and five of them (p4_move_applied, p4_mandatory_capture,
+        p5_chain_continues, p5_promotion_stops_chain, p12_sfx) hand the turn to
+        white and assert it STAYS white.  Under the new default the machine
+        takes that turn instead - and they would mostly still pass, because
+        play() flips `side` to white before ai_turn() blocks and tap() only
+        advances 38 frames of a 177-384 frame think, so a read taken right after
+        a tap sees white mid-search.  Forcing 2P here is what makes those five
+        about the rules rather than about the timing.
+
+        Forced AFTER the boot frames and BEFORE the START hold, which is the
+        only moment it is read: mode_1p is consulted by new_game()'s loop, not
+        by the title.  Guarded by the map because a pre-P10 ROM has no such
+        symbol, and an unguarded write would turn those ROMs' assertion failure
+        (exit 1) into a KeyError (exit 2)."""
         self.run(boot)
+        if "mode_1p" in self.addr:
+            set_byte(self, "mode_1p", MODE_2P)
         self.run(20, "S")
         self.run(settle)
 
@@ -1248,6 +1267,15 @@ def p6_win_and_restart(g):
     g.start()
     if not g.need("board", "side", "state", "cursor", "sel", "n_moves", "moves"):
         return
+    # Two players, stated rather than relied on.  This check hands the turn to
+    # white and needs it to stay there, and under P14's 1-Player default it
+    # would only be safe because p6_setup_stuck's position leaves white with no
+    # moves at all, so `state` is ST_OVER and machine_to_move() is false.  That
+    # is an accident of this position, not a property of the check, and it ends
+    # the moment someone picks a stuck position white can actually use.
+    # Game.start() already forces 2P for every caller; this says so locally.
+    if "mode_1p" in g.addr:
+        set_byte(g, "mode_1p", MODE_2P)
 
     p6_setup_stuck(g)
     ms = legal_moves(g)
@@ -1610,25 +1638,27 @@ def p10_ai_opponent(g):
     # `board`, `side`, `state`, `sel` and `chain_sq` are all unchanged by a
     # SELECT press - so a screen_stale() that does not watch mode_1p leaves the
     # old line sitting there and this is what catches it.
-    check(g.find_text("2 PLAYERS") != [] and g.find_text("1 PLAYER") == [],
-          "the title offers 2 PLAYERS (%r / %r)"
-          % (g.find_text("2 PLAYERS"), g.find_text("1 PLAYER")))
-    check(g.var("mode_1p") == MODE_2P,
-          "and 2 players is where the game starts (%d)" % g.var("mode_1p"))
-    tap(g, "T")
+    #
+    # P14 inverted these four: the boot default is 1 PLAYER now (it was 2), so
+    # the first pair asserts the new default and the taps walk the other way.
+    # The last one still has to land on 1 PLAYER, which is the game about to
+    # start below - it takes two taps to get back there now, not three.
     check(g.find_text("1 PLAYER") != [] and g.find_text("2 PLAYERS") == [],
-          "SELECT flips the line to 1 PLAYER, and the screen redrew for it "
-          "(%r / %r)" % (g.find_text("1 PLAYER"), g.find_text("2 PLAYERS")))
+          "the title offers 1 PLAYER (%r / %r)"
+          % (g.find_text("1 PLAYER"), g.find_text("2 PLAYERS")))
     check(g.var("mode_1p") == MODE_1P,
+          "and 1 player is where the game starts (%d)" % g.var("mode_1p"))
+    tap(g, "T")
+    check(g.find_text("2 PLAYERS") != [] and g.find_text("1 PLAYER") == [],
+          "SELECT flips the line to 2 PLAYERS, and the screen redrew for it "
+          "(%r / %r)" % (g.find_text("2 PLAYERS"), g.find_text("1 PLAYER")))
+    check(g.var("mode_1p") == MODE_2P,
           "mode_1p followed it (%d)" % g.var("mode_1p"))
     tap(g, "T")
-    check(g.find_text("2 PLAYERS") != [] and g.var("mode_1p") == MODE_2P,
-          "and SELECT flips it back (%r, mode %d)"
-          % (g.find_text("2 PLAYERS"), g.var("mode_1p")))
-    tap(g, "T")
-    check(g.var("mode_1p") == MODE_1P and g.find_text("1 PLAYER") != [],
-          "1 PLAYER, for the game about to start (%d, %r)"
-          % (g.var("mode_1p"), g.find_text("1 PLAYER")))
+    check(g.var("mode_1p") == MODE_1P and g.find_text("1 PLAYER") != []
+          and g.find_text("2 PLAYERS") == [],
+          "and SELECT flips it back - 1 PLAYER, for the game about to start "
+          "(%d, %r)" % (g.var("mode_1p"), g.find_text("1 PLAYER")))
 
     # --- 1 player: the human opens as black -------------------------------
     g.run(20, "S")              # held, not tapped - see Game.start()
@@ -2122,6 +2152,52 @@ def p13_sgb_border(g):
           "and the blobs sit inside the ROM (%d bytes)" % len(rom))
 
 
+# ---------------------------------------------------------------- P14 -------
+def p14_one_player_default(g):
+    """The title opens on 1 PLAYER, and SELECT still flips it both ways.
+
+    ONE INITIALISER IS THE WHOLE GAME-SIDE CHANGE (main.c: `mode_1p = 1u`), so
+    there is nothing here to compute and no rules to re-derive - the check is
+    that the title a player is actually shown, on a boot that nobody has
+    touched, is the 1-Player one.
+
+    BOOTED RAW - `g.run(150)`, exactly as p10 does - and NOT through
+    Game.start().  P14 taught start() to force MODE_2P so the eleven checks
+    that come through it keep playing two players; calling it here would force
+    the very mode this check exists to observe and it would fail on this
+    phase's own ROM.  That is the trap this comment is guarding.
+
+    The rendered line is read as well as the variable: the title is what a
+    player sees, and mode_1p alone cannot tell "the default changed" from "the
+    default changed and the screen behind it did not".
+
+    POWER GATE: on a build with the initialiser reverted this exits 1 with
+    `mode_1p` reading 0 and the title reading "2 PLAYERS" - measured, not
+    assumed; the message below is what the gate log shows."""
+    print("P14 1 PLAYER is the boot default")
+    g.run(150)          # the Game constructor ticks nothing - see p1
+    if not g.need("mode_1p"):
+        return
+
+    check(g.var("mode_1p") == MODE_1P,
+          "a boot nobody touched is in 1-player mode (mode_1p %d, wanted %d)"
+          % (g.var("mode_1p"), MODE_1P))
+    check(g.find_text("1 PLAYER") != [] and g.find_text("2 PLAYERS") == [],
+          "and the title says so - 1 PLAYER, and not 2 PLAYERS (%r / %r)"
+          % (g.find_text("1 PLAYER"), g.find_text("2 PLAYERS")))
+
+    tap(g, "T")
+    check(g.var("mode_1p") == MODE_2P and g.find_text("2 PLAYERS") != []
+          and g.find_text("1 PLAYER") == [],
+          "SELECT still flips it to 2 PLAYERS, and redraws for it (%d, %r)"
+          % (g.var("mode_1p"), g.find_text("2 PLAYERS")))
+    tap(g, "T")
+    check(g.var("mode_1p") == MODE_1P and g.find_text("1 PLAYER") != []
+          and g.find_text("2 PLAYERS") == [],
+          "and back to 1 PLAYER (%d, %r)"
+          % (g.var("mode_1p"), g.find_text("1 PLAYER")))
+
+
 CHECKS = [("p1_boot_title_board", p1_boot_title_board),
           ("p2_start_position", p2_start_position),
           ("p3_select_and_highlight", p3_select_and_highlight),
@@ -2135,7 +2211,8 @@ CHECKS = [("p1_boot_title_board", p1_boot_title_board),
           ("p10_ai_opponent", p10_ai_opponent),
           ("p11_think_budget", p11_think_budget),
           ("p12_sfx", p12_sfx),
-          ("p13_sgb_border", p13_sgb_border)]
+          ("p13_sgb_border", p13_sgb_border),
+          ("p14_one_player_default", p14_one_player_default)]
 
 
 def main(rom, mapfile):
