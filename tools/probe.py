@@ -31,6 +31,13 @@ T_BLANK, T_DARK, T_DARK_HL = 0, 1, 2
 T_PIECE0 = 3                    # 4 kinds x 4 quadrants: 3..18
 T_DIGIT0, T_LETTER0 = 20, 30    # 20..29, 30..55
 
+# BG colour -> rendered pixel, for BGP = 0xE4 (colour 0 is the lightest shade).
+# PyBoy renders the four DMG shades as 255 / 170 / 85 / 0.  The two board tiles
+# are flat fills of colour 0 and colour 2, so a board cell has to come back as
+# exactly one of these two values all the way across.
+LIGHT_BG = 255                  # T_BLANK
+DARK_BG = 85                    # T_DARK
+
 # --- layout ----------------------------------------------------------------
 MAP0 = 0x9800                   # BG tilemap
 MAP_W = 32
@@ -101,6 +108,12 @@ class Game:
         """BG tile id at map cell (x, y)."""
         return self.p.memory[MAP0 + y * MAP_W + x]
 
+    def cell_flat(self, sq_row, sq_col, px):
+        """True when every one of a cell's 16x16 rendered pixels is `px`."""
+        a = self.p.screen.ndarray
+        block = a[16 * sq_row:16 * sq_row + 16, 16 * sq_col:16 * sq_col + 16, 0]
+        return bool((block == px).all())
+
     def run(self, frames, buttons=""):
         """Press -> tick -> release, PER FRAME. A press held across ticks is not
         the same input: the game samples `pressed` edge-per-frame."""
@@ -150,7 +163,6 @@ def p1_boot_title_board(g):
     check(len(s) > 0, "the prompt spells PRESS START at %r" % (s,))
     check(bool(t) and bool(s) and s[0][0] > t[0][0],
           "the prompt sits below the title (%r vs %r)" % (t[:1], s[:1]))
-
     print("P1 board grid after START")
     g.start()
     # Counted per SQUARE, not per tile.  A square is a 2x2 block of tiles, so
@@ -170,6 +182,25 @@ def p1_boot_title_board(g):
             if not g.cell_is(row, col, want):
                 bad.append((row, col, want))
     check(not bad, "every cell is dark iff (row+col) is odd (%d wrong: %r)"
+          % (len(bad), bad[:4]))
+
+    # The tilemap records WHICH id was written, never whether the bank behind
+    # it holds the art.  GBDK's crt0 preloads its own ASCII font at 0x9000, so
+    # a ROM that never loaded a tile bank still renders glyph-shaped pixels and
+    # still spells the title in the map -- neither the checks above nor an
+    # "is the tile data blank" check can tell the two apart.  The rendered
+    # screen can: a board cell is a flat fill, so anything else behind the id
+    # shows up.  This is what makes the tile-id budget (< 128, i.e. inside the
+    # 0x9000 page) an assertion rather than a comment.
+    #
+    # It reads whole cells, sprites included, so it holds only while nothing is
+    # drawn over the board.  The cursor sprite is parked off-screen at (0, 0)
+    # here; a phase that moves it onto a cell has to park it in this state or
+    # narrow this check to the pixels the cursor does not cover.
+    print("P1 rendered board")
+    bad = [(r, c) for r in range(8) for c in range(8)
+           if not g.cell_flat(r, c, DARK_BG if (r + c) & 1 else LIGHT_BG)]
+    check(not bad, "every board cell renders flat in its own colour (%d off: %r)"
           % (len(bad), bad[:4]))
 
 
