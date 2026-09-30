@@ -3,6 +3,7 @@
 #   make test     host unit tests for sim.h (plain gcc, no emulator)
 #   make geom     regenerate board_geom.h from boardgen.py
 #   make gfx      regenerate gfx.h from mkgfx.py
+#   make border   regenerate border_data.c from art/border_sgb.png (SGB border)
 #   make sym      -debug build: draughts.map carries every symbol, not just globals
 #   make probe    headless PyBoy checks (implies sym; see .claude/PLAN.md)
 #   make usage    ROM/RAM headroom
@@ -10,13 +11,14 @@
 #   make clean
 
 ROM    = draughts.gb
-CFILES = main.c
-SRCS   = $(CFILES) sim.h board_geom.h gfx.h
+CFILES = main.c sgb_border.c border_data.c
+SRCS   = $(CFILES) sim.h board_geom.h gfx.h sgb_border.h border_data.h
 
 ifneq ($(wildcard $(GBDK_HOME)/bin/lcc),)
   RUN   :=
   LCC   := $(GBDK_HOME)/bin/lcc
   USAGE := $(GBDK_HOME)/bin/romusage
+  P2A   := $(GBDK_HOME)/bin/png2asset
 else
   # GBDK is not installed on this host, so run the toolchain out of the image.
   # lcc must be the FULL PATH: it is not on PATH inside gbdk-dev, and a bare
@@ -25,6 +27,7 @@ else
   RUN   := docker run --rm -u $(shell id -u):$(shell id -g) -v "$(CURDIR)":/work -w /work gbdk-dev
   LCC   := /opt/gbdk/bin/lcc
   USAGE := /opt/gbdk/bin/romusage
+  P2A   := /opt/gbdk/bin/png2asset
 endif
 
 # PyBoy lives in a venv, not on PATH (and not in this repo). The tiers matter:
@@ -79,6 +82,15 @@ geom:
 gfx:
 	python3 mkgfx.py
 
+# The Super Game Boy border: art/border_sgb.png (256x224; the 160x144 game area
+# at x=48,y=40 is transparent) -> border_data.c/.h, committed like gfx.h so a
+# plain `make` needs no Python. -pack_mode sgb is what gets the SGB layout --
+# 4bpp tiles, a 256x224 map, one attribute byte per cell -- instead of a GB
+# screen; -use_map_attributes keeps that byte, which is the per-cell palette.
+border:
+	$(RUN) $(P2A) art/border_sgb.png -map -bpp 4 -max_palettes 4 \
+	      -pack_mode sgb -use_map_attributes -c border_data.c
+
 # romusage reads the .map, which only `sym` writes -- so it depends on sym, not
 # on $(ROM).
 usage: sym
@@ -90,4 +102,4 @@ image:
 clean:
 	rm -f $(ROM) *.map *.noi *.o *.lst *.sym *.ihx *.asm *.adb tests/test_sim
 
-.PHONY: all test geom gfx sym probe shot usage image clean
+.PHONY: all test geom gfx border sym probe shot usage image clean

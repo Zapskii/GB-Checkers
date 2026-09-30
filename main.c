@@ -26,9 +26,12 @@
  * also new game).
  */
 #include <gb/gb.h>
+#include <gb/sgb.h>
 #include <stdint.h>
 #include "gfx.h"
 #include "sim.h"
+#include "sgb_border.h"
+#include "border_data.h"
 
 /* ---------------------------------------------------------------- layout
  * From PLAN.md's data contract: the board is 8x8 cells of 2x2 tiles, at tiles
@@ -843,6 +846,27 @@ void main(void)
     SHOW_SPRITES;                   /* nothing marked yet: both rings parked
                                      * until START enters ST_SELECT */
     DISPLAY_ON;
+
+    /* Super Game Boy border, once, at boot.  The SGB reads the CHR_TRN/PCT_TRN
+     * payloads off the rendered screen, so this has to come after DISPLAY_ON --
+     * and it trashes the BG tile bank getting there (it loads all 256 border
+     * tiles at tile 0), so gfx_tiles is put back on the next line.  That reload
+     * happens with the display already on, exactly as set_sgb_border's own
+     * VRAM writes do; it is what the sibling ships.  Four frames first: a PAL
+     * SNES needs that delay at startup or no border shows.  sgb_check() is
+     * false on a DMG, so an ordinary Game Boy boots exactly as it did before --
+     * all of this, including the tile reload, is behind that gate. */
+    {
+        uint8_t i;
+        for (i = 0; i != 4; i++) vsync();
+    }
+    if (sgb_check()) {
+        set_sgb_border((unsigned char *)border_data_tiles, sizeof(border_data_tiles),
+                       (unsigned char *)border_data_map, sizeof(border_data_map),
+                       (unsigned char *)border_data_palettes,
+                       sizeof(border_data_palettes));
+        set_bkg_data(0, GFX_TILE_COUNT, gfx_tiles);
+    }
 
     state = ST_TITLE;
     prev_keys = 0;

@@ -95,6 +95,10 @@ class Game:
         # - which is a check that reads as "has power" and is really noise.
         self.p = PyBoy(rom, window="null", sound_emulated=True)
         self.addr = parse_map(mapfile)
+        # p13 reads the ROM file and the map as bytes rather than the running
+        # game, and PyBoy does not hand its own rom path back out.
+        self.rom = rom
+        self.mapfile = mapfile
 
     def need(self, *names):
         """Record a failure for each symbol absent from the map.
@@ -2036,6 +2040,88 @@ def p12_sfx(g):
           "main.c's 0x%02X" % (ch4_0, ch4_1, PROMOTE_ENV))
 
 
+# ---------------------------------------------------------------- P13 -------
+SGB_FLAG = 0x0146               # 0x03 = the cart claims SGB support
+OLD_LICENSEE = 0x014B           # 0x33 = "SGB"
+# The sizes the border blobs are linked at, from border_data.h.  Used to prove
+# the data is in the ROM at FULL length rather than just named in the map.
+BORDER_TILES_BYTES = 5920       # border_data_tiles[]
+BORDER_PAL_BYTES = 32           # border_data_palettes: 16 palette_color_t
+
+
+def parse_border_map(path):
+    """`_border_data_tiles` and friends out of the linker map.
+
+    These live in their own translation unit, so parse_map() -- which matches
+    `Fmain$...` only -- never sees them.  The area listing gives the symbol and
+    the object it came from, which is enough: a module that was NOT linked in
+    has no line at all, which is exactly what P12's ROM looks like."""
+    out = {}
+    for line in open(path):
+        m = re.match(r"\s*([0-9A-Fa-f]{8})\s+_border_data_(\w+)\s+border_data\s*$",
+                     line)
+        if m:
+            out[m.group(2)] = int(m.group(1), 16)
+    return out
+
+
+def p13_sgb_border(g):
+    """The border data is linked into the ROM, and the ROM declares itself SGB.
+
+    THIS CHECK IS BYTES, NOT PIXELS.  PyBoy shows nothing of an SGB border --
+    it emulates a DMG, where sgb_check() is false and every line of this is
+    skipped -- and a ROM built without -Wm-ys has its SGB packets silently
+    discarded, so mGBA emulates a plain DMG too.  A border can therefore look
+    "done" and render nowhere.  That the artwork actually frames the board is
+    an EYEBALL, a human in mGBA with SGB emulation on, and it is named as an
+    eyeball in the phase evidence.  What is asserted here is the three things
+    that can be read:
+
+      * 0x0146 == 0x03, the SGB flag.
+      * 0x014B == 0x33, old licensee "SGB".
+      * border_data is linked in at its full length.
+
+    The gate is the third: P12's ROM has no border_data module at all, so the
+    map parse comes back empty and this exits 1 (measured against a P12-shaped
+    map: "FAIL border_data_tiles is linked in (found at nowhere)" x3).
+
+    0x0146 is the MUTATION CONTROL.  -Wm-ys has been in LCCFLAGS since P1, so
+    the byte is already 0x03 on P12's ROM and cannot gate anything -- deleting
+    -Wm-ys is what makes it fail.  MEASURED: with the flag removed the ROM's
+    0x0146 is 0x00.  0x014B does NOT move with it -- it reads 0x33 either way,
+    which is the toolchain's own default old-licensee byte, not something
+    -Wm-ys writes.  It is asserted because an SGB cartridge should carry it,
+    and it is honest about being a companion rather than the control."""
+    print("P13 the ROM declares SGB and carries the border data")
+
+    rom = open(g.rom, "rb").read()
+    check(rom[SGB_FLAG] == 0x03,
+          "the SGB flag is set: ROM[0x0146] = 0x%02X" % rom[SGB_FLAG])
+    check(rom[OLD_LICENSEE] == 0x33,
+          "the old-licensee byte says SGB: ROM[0x014B] = 0x%02X"
+          % rom[OLD_LICENSEE])
+
+    b = parse_border_map(g.mapfile)
+    for name in ("tiles", "map", "palettes"):
+        check(name in b,
+              "border_data_%s is linked in (found at %s)"
+              % (name, "0x%04X" % b[name] if name in b else "nowhere"))
+    if not all(n in b for n in ("tiles", "map", "palettes")):
+        return
+
+    # Non-empty means at full length: the tile blob runs right up to the map
+    # blob in the map's own listing, and a truncated or stubbed array would
+    # leave a gap that is not 5920.
+    check(b["map"] - b["tiles"] == BORDER_TILES_BYTES,
+          "the tile blob is all %d bytes on the ROM (tiles 0x%04X -> map "
+          "0x%04X)" % (BORDER_TILES_BYTES, b["tiles"], b["map"]))
+    check(b["tiles"] - b["palettes"] == BORDER_PAL_BYTES,
+          "the palette blob is all %d bytes (palettes 0x%04X -> tiles 0x%04X)"
+          % (BORDER_PAL_BYTES, b["palettes"], b["tiles"]))
+    check(b["tiles"] + BORDER_TILES_BYTES <= len(rom),
+          "and the blobs sit inside the ROM (%d bytes)" % len(rom))
+
+
 CHECKS = [("p1_boot_title_board", p1_boot_title_board),
           ("p2_start_position", p2_start_position),
           ("p3_select_and_highlight", p3_select_and_highlight),
@@ -2048,7 +2134,8 @@ CHECKS = [("p1_boot_title_board", p1_boot_title_board),
           ("p8_one_step_per_tap", p8_one_step_per_tap),
           ("p10_ai_opponent", p10_ai_opponent),
           ("p11_think_budget", p11_think_budget),
-          ("p12_sfx", p12_sfx)]
+          ("p12_sfx", p12_sfx),
+          ("p13_sgb_border", p13_sgb_border)]
 
 
 def main(rom, mapfile):
