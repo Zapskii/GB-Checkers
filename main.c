@@ -1,10 +1,11 @@
 /* GB-DRAUGHTS - English draughts for the Game Boy (GBDK-2020).
  *
  * The rules engine lives in sim.h and is unit tested on the host; this file
- * owns everything that touches hardware.  P4: A on a highlighted destination
- * plays that move - through sim.h's apply_move, never a second copy of the bit
- * twiddling here - and the turn passes to the other side.  A capture ends the
- * turn like any other move; multi-jump chains are P5.
+ * owns everything that touches hardware.  P5: a capture that can continue
+ * does - the SAME piece captures again and the turn does not pass - and a hop
+ * that promotes ends the turn on the spot, even though the new king could
+ * geometrically keep going.  Which of those two it is is decided by
+ * move_causes_promotion() on the PRE-move board; see play().
  *
  * Controls: START = new game, d-pad = move the cursor, A = select/play,
  * B = deselect.
@@ -69,6 +70,12 @@ static uint8_t n_moves;
 static uint8_t sel;       /* the picked-up square, NO_SQ when none */
 static uint8_t cursor;    /* the square the cursor sprite sits on */
 
+/* Set when a capture can continue with the SAME piece, NO_SQ otherwise, and
+ * the one thing that decides which entry point compute_legal() asks.  It is a
+ * rule input, not a cache: play() sets it from `board` after every hop and
+ * nothing else, so it cannot outlive the position it describes. */
+static uint8_t chain_sq;
+
 /* The frame's whole tilemap, built then blitted in one write inside VBlank.
  * The HUD is a second, much smaller blit: it is the one thing on the screen
  * that lives outside the board's 16x16 region. */
@@ -86,8 +93,18 @@ static void compute_legal(void)
      * rebuilt here every frame - never carried over from the last one.  Mandatory
      * capture costs nothing at this point: gen_moves() already returns captures
      * and nothing else when any piece of this side has one, so the legal set IS
-     * the enforcement and there is no cache behind it to go stale. */
-    n_moves = gen_moves(&board, side, moves);
+     * the enforcement and there is no cache behind it to go stale.
+     *
+     * Mid-chain the rule is a different one, so the entry point is a different
+     * one.  gen_moves() is the turn-START entry point - whole side, mandatory
+     * capture - and asking it again halfway through a chain is the quiet way
+     * this breaks: the piece that just captured is no longer the only piece on
+     * offer, so a second piece's capture (or, with no capture left anywhere, a
+     * quiet move) becomes playable and the mandatory continuation is gone
+     * without anything looking wrong on screen.  gen_captures_from() is the
+     * mid-chain rule entire: this piece, capturing, or nothing at all. */
+    if (chain_sq != NO_SQ) n_moves = gen_captures_from(&board, side, chain_sq, moves);
+    else                   n_moves = gen_moves(&board, side, moves);
 
     if (sel == NO_SQ) return;                 /* nothing picked up: keep all */
     for (i = 0; i < n_moves; i++) {
@@ -151,6 +168,7 @@ static uint8_t dir_of(uint8_t k)
 
 static void refresh_moves(void)
 {
+    chain_sq = NO_SQ;         /* back to a turn start */
     sel = NO_SQ;
     state = ST_SELECT;
     compute_legal();
@@ -158,8 +176,26 @@ static void refresh_moves(void)
 
 /* Plays the move that lands on `sq`, if the piece picked up has one.  The move
  * comes straight out of the list the screen is showing, so what gets applied is
- * exactly what was highlighted; sel and cursor both park, and the next d-pad
- * press re-seats the cursor on the new side's first legal square.
+ * exactly what was highlighted.
+ *
+ * Then the turn does one of two things, and telling them apart is what this
+ * phase is about:
+ *
+ *   - the piece captured and can capture AGAIN: it stays up, the same piece is
+ *     still selected, the turn does NOT pass, and `chain_sq` records where it
+ *     is so compute_legal() asks gen_captures_from() from now on.
+ *   - otherwise (a quiet move, a final capture, or a promotion): the piece
+ *     parks and the turn passes - sel and cursor go to NO_SQ, and the next
+ *     d-pad press re-seats the cursor on the new side's first legal square.
+ *
+ * THE TRAP: must_continue() sees only a board.  On the very hop that crowns a
+ * man, apply_move() has already promoted it, so must_continue() finds a king
+ * where a man was and reports "yes, this one can capture again" - which is
+ * wrong, because a promotion ends the turn.  Only move_causes_promotion() on
+ * the PRE-move board knows, which is why it is checked here, on `before`,
+ * before must_continue() on `board` is trusted.  This exact bug shipped in
+ * this repo once; the wrong form is:
+ *     if (m.capture != NO_SQ && must_continue(&board, m.to))
  *
  * A is a no-op when nothing lands on `sq` - picking a piece up and pressing A
  * again without walking anywhere - which is why this searches the list rather
@@ -173,12 +209,26 @@ static void play(uint8_t sq)
 {
     uint8_t i;
     for (i = 0; i < n_moves; i++) {
-        if (moves[i].to != sq) continue;
-        board = apply_move(board, moves[i]);
-        sel = NO_SQ;
-        cursor = NO_SQ;
-        side = (uint8_t)(side ^ 1u);
-        state = ST_SELECT;
+        Move m = moves[i];
+        Board before;
+
+        if (m.to != sq) continue;
+
+        before = board;
+        board = apply_move(board, m);
+        if (m.capture != NO_SQ && !move_causes_promotion(&before, m) &&
+            must_continue(&board, m.to)) {
+            chain_sq = m.to;
+            sel = m.to;               /* the same piece is still up */
+            cursor = m.to;
+            state = ST_TARGET;        /* and its next hops are the targets */
+        } else {
+            chain_sq = NO_SQ;
+            sel = NO_SQ;
+            cursor = NO_SQ;
+            side = (uint8_t)(side ^ 1u);
+            state = ST_SELECT;
+        }
         return;
     }
 }
@@ -209,8 +259,12 @@ static void handle_input(void)
             play(cursor);                     /* A on a destination: move it */
         }
     }
+    /* B drops a piece you picked up.  Mid-chain there is nothing to drop: the
+     * capture is already on the board and cannot be taken back, so "refresh"
+     * here would clear chain_sq and hand the turn back to gen_moves() - the
+     * mandatory continuation quietly gone, which is the second trap. */
     if (pressed & J_B) {
-        if (state == ST_TARGET) refresh_moves();
+        if (state == ST_TARGET && chain_sq == NO_SQ) refresh_moves();
     }
 }
 

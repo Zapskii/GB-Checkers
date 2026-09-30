@@ -792,11 +792,196 @@ def p4_mandatory_capture(g):
           % ([g.tile(x, y) for x, y in cells(3, 4)],))
 
 
+# ---------------------------------------------------------------- P5 --------
+def p5_chain_continues(g):
+    """A capture that can continue does: the SAME piece goes again, the turn
+    does not pass, and the screen offers only that piece's next hop."""
+    print("P5 a capture chain continues with the same piece")
+    g.start()
+    if not g.need("board", "side", "cursor", "sel", "state", "n_moves", "moves",
+                  "chain_sq"):
+        return
+
+    # 13 -SE-> 17 -SE-> 22, so 17 is the man taken; then 22 -SW-> 25 -SW-> 29,
+    # taking 25.  Both hops are captures and the second lands in row 7.  NEIGH
+    # says so; the board goes straight into WRAM and main.c redraws from it,
+    # the same trick the P4 checks use.
+    blk, wht = 1 << 13, (1 << 17) | (1 << 25)
+    a = g.addr["board"]
+    g.p.memory[a:a + 12] = board_bytes(blk, wht, 0)
+    g.p.memory[g.addr["side"]:g.addr["side"] + 1] = bytes([SIDE_BLACK])
+    g.p.memory[g.addr["cursor"]:g.addr["cursor"] + 1] = bytes([13])
+    g.run(20)                     # a couple of game iterations, so the screen
+                                  # has redrawn from the written board too
+
+    check(g.var("cursor") == 13, "the cursor is on square 13 (%d)"
+          % g.var("cursor"))
+    check(piece_kinds(g) == {(3, 2): 0, (4, 3): 1, (6, 3): 1},
+          "the screen followed the board write - a black man on cell(3, 2) "
+          "(sq 13), white men on cell(4, 3) and cell(6, 3) (%r)"
+          % (sorted(piece_kinds(g).items()),))
+    ms = legal_moves(g)
+    check(len(ms) == 1 and ms[0] == {"from": 13, "to": 22, "capture": 17},
+          "black's only legal move is the jump 13 -> 22 over 17 (%r)" % (ms,))
+
+    # --- hop one ---------------------------------------------------------
+    tap(g, "A")
+    check(g.var("sel") == 13 and g.var("state") == ST_TARGET,
+          "A picks the man on 13 up (%d, state %d)"
+          % (g.var("sel"), g.var("state")))
+    check(hl_cells(g) == [(5, 4)], "its landing square, 22, lights up (%r)"
+          % (hl_cells(g),))
+
+    g.run(30, "D")                # DOWN is DIR_SE: 13 -SE-> 17 -SE-> 22
+    g.run(14)
+    check(g.var("cursor") == 22,
+          "DOWN steps over the man on 17 and lands the cursor on 22 (%d)"
+          % g.var("cursor"))
+    tap(g, "A")
+
+    blk, wht, kng = board_masks(g)
+    check(blk == 1 << 22, "the man is now on 22 (black 0x%08X)" % blk)
+    check(not (wht & (1 << 17)),
+          "the man it jumped on 17 is gone (white 0x%08X)" % wht)
+    check(bool(wht & (1 << 25)),
+          "and the man on 25, which this hop did not take, is STILL there "
+          "(white 0x%08X)" % wht)
+
+    # THE rule.  must_continue() is true here - 22 has another jump - so the
+    # turn must not pass: same side to move, same piece still up, and only that
+    # piece's next hop on offer.  A turn loop that switches sides after every
+    # hop fails every one of these.
+    check(g.var("side") == SIDE_BLACK,
+          "the turn did NOT pass - black is still to move (side %d)"
+          % g.var("side"))
+    check(g.var("chain_sq") == 22, "main.c knows it is mid-chain, on square 22 "
+                                   "(%#x)" % g.var("chain_sq"))
+    check(g.var("sel") == 22 and g.var("state") == ST_TARGET,
+          "the same piece is still picked up (%#x, state %d)"
+          % (g.var("sel"), g.var("state")))
+    ms = legal_moves(g)
+    check(len(ms) == 1 and ms[0] == {"from": 22, "to": 29, "capture": 25},
+          "the legal set is that piece's next jump and nothing else (%r)"
+          % (ms,))
+    check({m["from"] for m in ms} == {22},
+          "and every move in it is played by the piece on 22 - not another "
+          "piece's, and not a quiet move (%r)"
+          % (sorted({m["from"] for m in ms}),))
+    check(hl_cells(g) == [(7, 2)],
+          "exactly one square is lit - its landing square, 29 (%r)"
+          % (hl_cells(g),))
+    check(g.var("cursor") == 22,
+          "and the cursor is on the piece, ready for the next hop (%d)"
+          % g.var("cursor"))
+    check(hud_word(g) == "BLACK", "the HUD still says BLACK (%r)" % hud_word(g))
+    check(cell_kind(g, 5, 4) == 0,
+          "the screen drew the capture: a black MAN on cell(5, 4) (%r)"
+          % (cell_kind(g, 5, 4),))
+    check(g.cell_is(4, 3, T_DARK),
+          "and the taken man's cell is bare board again (%r)"
+          % ([g.tile(x, y) for x, y in cells(4, 3)],))
+
+    # --- hop two ---------------------------------------------------------
+    g.run(30, "L")                # LEFT is DIR_SW: 22 -SW-> 25 -SW-> 29
+    g.run(14)
+    check(g.var("cursor") == 29,
+          "LEFT steps over the man on 25 and lands the cursor on 29 (%d)"
+          % g.var("cursor"))
+    tap(g, "A")
+
+    blk, wht, kng = board_masks(g)
+    check(bool(blk & (1 << 29)), "the piece is on 29 (black 0x%08X)" % blk)
+    check(not (wht & (1 << 25)), "the man on 25 is gone (white 0x%08X)" % wht)
+    check(g.var("side") == SIDE_WHITE,
+          "and with nothing left to capture the turn passes: white to move "
+          "(side %d)" % g.var("side"))
+    check(g.var("chain_sq") == NO_SQ, "the chain is over (%#x)"
+          % g.var("chain_sq"))
+    check(hl_cells(g) == [], "nothing is highlighted (%r)" % (hl_cells(g),))
+    check(hud_word(g) == "WHITE", "the HUD followed the turn: WHITE (%r)"
+          % hud_word(g))
+
+
+def p5_promotion_stops_chain(g):
+    """A hop that promotes ends the turn on the spot - even though the new king
+    could geometrically keep capturing."""
+    print("P5 promotion stops the chain")
+    g.start()
+    if not g.need("board", "side", "cursor", "sel", "state", "n_moves", "moves",
+                  "chain_sq"):
+        return
+
+    # 21 -SE-> 25 -SE-> 30.  30 is in row 7, so the man CROWNS on landing.
+    # White also holds 26, NE of the landing square: NEIGH[30][NE] == 26, and
+    # NEIGH[26][NE] == 23 is empty, so a bare must_continue(&board, 30) on the
+    # post-move board answers yes - that king really could jump the man on 26.
+    # That answer is what must not be acted on: the promotion ends the turn.
+    blk, wht = 1 << 21, (1 << 25) | (1 << 26)
+    a = g.addr["board"]
+    g.p.memory[a:a + 12] = board_bytes(blk, wht, 0)
+    g.p.memory[g.addr["side"]:g.addr["side"] + 1] = bytes([SIDE_BLACK])
+    g.p.memory[g.addr["cursor"]:g.addr["cursor"] + 1] = bytes([21])
+    g.run(20)
+
+    check(piece_kinds(g) == {(5, 2): 0, (6, 3): 1, (6, 5): 1},
+          "the screen followed the board write - a black man on cell(5, 2) "
+          "(sq 21), white men on cell(6, 3) and cell(6, 5) (%r)"
+          % (sorted(piece_kinds(g).items()),))
+    ms = legal_moves(g)
+    check(len(ms) == 1 and ms[0] == {"from": 21, "to": 30, "capture": 25},
+          "black's only legal move is the jump 21 -> 30 over 25 (%r)" % (ms,))
+
+    tap(g, "A")
+    check(g.var("sel") == 21 and g.var("state") == ST_TARGET,
+          "A picks the man on 21 up (%d, state %d)"
+          % (g.var("sel"), g.var("state")))
+    check(hl_cells(g) == [(7, 4)], "its landing square, 30, lights up (%r)"
+          % (hl_cells(g),))
+
+    g.run(30, "D")                # DOWN is DIR_SE: 21 -SE-> 25 -SE-> 30
+    g.run(14)
+    check(g.var("cursor") == 30,
+          "DOWN steps over the man on 25 and lands the cursor on 30 (%d)"
+          % g.var("cursor"))
+    tap(g, "A")
+
+    blk, wht, kng = board_masks(g)
+    check(bool(blk & (1 << 30)), "the piece is on 30 (black 0x%08X)" % blk)
+    check(bool(kng & (1 << 30)),
+          "and it crowned on landing - kings bit 30 (kings 0x%08X)" % kng)
+    check(not (wht & (1 << 25)), "the man it jumped on 25 is gone (white "
+                                 "0x%08X)" % wht)
+
+    # The assertion this phase exists for.  26 is the man a bare
+    # must_continue() would want to take next; it must survive.
+    check(bool(wht & (1 << 26)),
+          "the man on 26 is STILL THERE - the new king does not capture again "
+          "in the turn it was crowned (white 0x%08X)" % wht)
+    check(g.var("side") == SIDE_WHITE,
+          "the turn passed on the promoting hop (side %d)" % g.var("side"))
+    check(g.var("chain_sq") == NO_SQ,
+          "no chain is open (%#x)" % g.var("chain_sq"))
+    check(g.var("sel") == NO_SQ and g.var("state") == ST_SELECT,
+          "the piece was let go (%#x, state %d)"
+          % (g.var("sel"), g.var("state")))
+    check(hl_cells(g) == [], "0 highlights (%r)" % (hl_cells(g),))
+    check(hud_word(g) == "WHITE", "the HUD followed the turn: WHITE (%r)"
+          % hud_word(g))
+    check(cell_kind(g, 7, 4) == 2,
+          "and the screen draws a black KING on cell(7, 4), not a man (%r)"
+          % (cell_kind(g, 7, 4),))
+    check(g.cell_is(6, 3, T_DARK),
+          "the taken man's cell is bare board again (%r)"
+          % ([g.tile(x, y) for x, y in cells(6, 3)],))
+
+
 CHECKS = [("p1_boot_title_board", p1_boot_title_board),
           ("p2_start_position", p2_start_position),
           ("p3_select_and_highlight", p3_select_and_highlight),
           ("p4_move_applied", p4_move_applied),
-          ("p4_mandatory_capture", p4_mandatory_capture)]
+          ("p4_mandatory_capture", p4_mandatory_capture),
+          ("p5_chain_continues", p5_chain_continues),
+          ("p5_promotion_stops_chain", p5_promotion_stops_chain)]
 
 
 def main(rom, mapfile):
