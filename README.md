@@ -22,11 +22,22 @@ There is no AI opponent yet - both players share the Game Boy (Milestone 2).
 | A      | pick up the piece under the cursor; press again on a highlighted square to play the move |
 | B      | put a picked-up piece back down; on a finished game, new game |
 
+The d-pad is rotated 45 degrees: **UP** and **RIGHT** both go up the screen,
+**DOWN** and **LEFT** both go down, and nothing moves straight sideways. A
+checker's neighbour is diagonal, so each button has to pick one of the four
+diagonals, and this is the one the four buttons cover.
+
+    UP    up-left        RIGHT  up-right
+    LEFT  down-left      DOWN   down-right
+
 The cursor can step *over* squares it cannot land on, so a piece that cannot
 move this turn is not something you can pick up by accident: with a capture
 available, a piece that has no capture has no legal move at all and the cursor
-will not settle on it. Mid-chain there is nothing to put back - the capture is
-already on the board - so B does nothing until the chain ends.
+will not settle on it. Bare board *is* a landing square, though, because the
+four men that can move at the start sit one row apart in a straight line, and a
+cursor that could rest only on pieces could never get from one to the next.
+Mid-chain there is nothing to put back - the capture is already on the board -
+so B does nothing until the chain ends.
 
 A game ends when the side to move has no legal move: no pieces left, or every
 piece blocked. The status row says who won and START (or B) starts a new game.

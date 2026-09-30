@@ -47,6 +47,14 @@ MAP_W = 32
 BOARD_TW = BOARD_TH = 16        # tiles; 8x8 cells of 2x2 tiles
 BOARD_TILES = [(x, y) for y in range(BOARD_TH) for x in range(BOARD_TW)]
 
+# A d-pad hold long enough for the game to sample it exactly ONCE, i.e. one
+# walk() call and no repeat notch.  Measured against this ROM: 1..7 frames are
+# missed entirely, 9..25 all give exactly one step (8 -> 13 from the start
+# square).  12 sits in the middle of that plateau.  PyBoy's clocks are
+# unfaithful, so this is calibrated, not derived -- re-measure it if the main
+# loop's timing changes.
+STEP_HOLD = 12
+
 
 def glyph(c):
     if "A" <= c <= "Z":
@@ -447,6 +455,35 @@ def tap(g, buttons, hold=24, settle=14):
     g.run(settle)
 
 
+def set_cursor(g, sq):
+    """Park the cursor on a square, and let the loop redraw around it.
+
+    Writing `cursor` directly is only sound because main.c recomputes
+    everything that depends on it (the move list, the sprite OAM, the
+    highlights) from the top of the loop each iteration; nothing caches it.
+    A test that had to *walk* to every square would need the walk correct
+    before it could check anything else, and the walk is one of the things
+    under test.
+    """
+    a = g.addr["cursor"]
+    g.p.memory[a:a + 1] = bytes([sq])
+    g.run(6)
+
+
+def step(g, key):
+    """One d-pad press, one walk() call - the calibrated hold, plus a redraw.
+
+    Use this and not a longer hold.  main.c walks again every REPEAT_DIV (8)
+    game iterations, which is ~69 emulator frames, so a 30 frame hold catches
+    one repeat about 40% of the time - and a repeat is a SECOND step along the
+    same diagonal.  That used to be harmless only because a repeat could not
+    land on bare board; now that it can, a 30 frame hold walks off the square
+    under test whenever the divider happens to fall inside the hold.
+    """
+    g.run(STEP_HOLD, key)
+    g.run(16)
+
+
 def p3_select_and_highlight(g):
     """Cursor, two-phase select, destination highlights, B backs out."""
     print("P3 cursor")
@@ -455,18 +492,28 @@ def p3_select_and_highlight(g):
         return
 
     # --- the sprite ------------------------------------------------------
-    # OAM y = 0 does not mean "top of the screen", it means "hidden", so a
-    # cursor parked there is no cursor at all: this is the phase where the
-    # sprite finally has to be somewhere.
+    movable = sorted({m["from"] for m in legal_moves(g)})
+    c0 = g.var("cursor")
+
+    # The cursor has to start somewhere the side to move can actually use.  It
+    # used to start on square 0 - a back-rank man with no legal move in any
+    # direction - so the first press of every game did nothing; and because
+    # square 0 is cell row 0 its sprite sat at OAM y = 0, which on the DMG
+    # means "hidden".  Both are asserted here.
+    check(c0 in movable,
+          "the cursor starts on a square that can move (%d, movable %r)"
+          % (c0, movable))
     x, y = g.cursor_xy()
-    check((x, y) == (16 * sq_col(0), 16 * sq_row(0)),
-          "the cursor sprite is on square 0 = cell(0, 1) = OAM (16, 0) (%r)"
-          % ((x, y),))
+    check((x, y) == (16 * sq_col(c0), 16 * sq_row(c0)),
+          "the cursor sprite is on square %d = cell(%d, %d) (%r)"
+          % (c0, sq_row(c0), sq_col(c0), (x, y)))
+    check(g.cursor_box() is not None,
+          "and it is really drawn - a sprite at OAM y=0 would be hidden (%r)"
+          % (g.cursor_box(),))
     check(0 <= x <= 127 and 0 <= y <= 127,
           "its OAM x/y are inside 0..127 (%r)" % ((x, y),))
     check(g.p.memory[OAM + 2] == 0, "sprite tile 0 is the cursor (%d)"
           % g.p.memory[OAM + 2])
-    check(g.var("cursor") == 0, "cursor == 0 after START (%d)" % g.var("cursor"))
     check(g.var("sel") == NO_SQ,
           "nothing is picked up yet: sel == NO_SQ (%#x)" % g.var("sel"))
     check(g.var("state") == ST_SELECT,
@@ -485,10 +532,81 @@ def p3_select_and_highlight(g):
           "and every one of them is played by a row-2 man (%r)"
           % (sorted({m["from"] for m in legal_moves(g)}),))
 
+    # --- every movable man has to be reachable ---------------------------
+    # This is the check whose absence let an unplayable ROM through.  The walk
+    # lands only on a square that is empty or in the move list, and it may
+    # only travel along ONE diagonal.  The four movable men sit on row 2, two
+    # columns apart (squares 8, 9, 10, 11), so no straight diagonal joins any
+    # two of them: while the walk landed ONLY on move-list squares the cursor
+    # was trapped on whichever man it first reached, and three of the side's
+    # four movable pieces could not be played at all.
+    #
+    # So walk the graph for real and require all four.  One press is one
+    # walk() call (STEP_HOLD), and every square reached is expanded in turn.
+    seen, frontier = {c0}, [c0]
+    while frontier:
+        nxt = []
+        for s in frontier:
+            for k in "UDLR":
+                set_cursor(g, s)
+                g.run(STEP_HOLD, k)
+                g.run(16)
+                t = g.var("cursor")
+                if t not in seen:
+                    seen.add(t)
+                    nxt.append(t)
+        frontier = nxt
+    unreachable = [m for m in movable if m not in seen]
+    check(not unreachable,
+          "every man the side to move may play is reachable from the start "
+          "square - unreachable %r (reached %r)" % (unreachable, sorted(seen)))
+
+    # --- the walk lands on bare board ------------------------------------
+    # Square 8 is cell(2, 1).  DOWN is DIR_SE, and the first square along it is
+    # 13, which is empty - so that is where the cursor rests, not on the man on
+    # 9 (a different diagonal, and occupied anyway).
+    set_cursor(g, 8)
+    step(g, "D")
+    check(g.var("cursor") == 13,
+          "DOWN from the start square steps onto bare board, square 13 (%d)"
+          % g.var("cursor"))
+    check(g.cursor_xy() == (16 * sq_col(13), 16 * sq_row(13)),
+          "and the sprite followed it to cell(3, 2) (%r)" % (g.cursor_xy(),))
+    step(g, "U")
+    check(g.var("cursor") == 8,
+          "and UP takes it back onto the man on square 8 (%d)" % g.var("cursor"))
+
+    # A walk still refuses to REST on a piece it cannot use - it steps over it.
+    # Square 4 is a back-rank black man (black holds 0..11 at the start), and
+    # being neither empty nor in the move list he is not a landing square, so
+    # UP from 8 (DIR_NW) goes right past him and off the board, leaving the
+    # cursor on 8.  Landing on "my man anyway" is the bug this phase exists to
+    # prevent, and a walk that steps over him is where it shows.
+    step(g, "U")
+    check(g.var("cursor") == 8,
+          "UP from 8 steps over the black man on square 4 - no legal move, so "
+          "not a landing square - and, the board ending there, stays on 8 (%d)"
+          % g.var("cursor"))
+    # The same rule on empty board, two hops deep: 9 -SE-> 14 -SE-> 18 are both
+    # empty, and from 18 the next square SE is 23, a WHITE man - occupied, and
+    # not in black's move list because black has no capture on, so it is
+    # stepped over too (and 27 after it, also white) and the cursor holds on 18.
+    set_cursor(g, 9)
+    for want in (14, 18):
+        step(g, "D")
+        check(g.var("cursor") == want,
+              "DOWN walks 9 -> 14 -> 18 onto bare board, now square %d (%d)"
+              % (want, g.var("cursor")))
+    step(g, "D")
+    check(g.var("cursor") == 18,
+          "and a third DOWN steps over the white men on 23 and 27, neither of "
+          "which is a capture target, and stays on 18 (%d)" % g.var("cursor"))
+
     # --- "selectable" means legal, not mine ------------------------------
-    # Square 0 holds a black man and is NOT selectable, because it has no
-    # legal move.  A cursor that picks up "my man" is the bug this phase
-    # exists to prevent, and A here is where it shows.
+    # Force the cursor onto that same unusable man and press A: nothing may
+    # happen.  A cursor that picks up "my man" is the bug this phase exists to
+    # prevent, and A here is where it shows.
+    set_cursor(g, 0)
     before = piece_kinds(g)
     tap(g, "A")
     check(g.var("sel") == NO_SQ and g.var("state") == ST_SELECT,
@@ -497,29 +615,8 @@ def p3_select_and_highlight(g):
     check(hl_cells(g) == [], "and lights nothing up (%r)" % (hl_cells(g),))
     check(piece_kinds(g) == before, "the pieces on screen did not change")
 
-    # --- the walk --------------------------------------------------------
-    # Square 0 is cell(0, 1): NW and NE are both off the board, so a press
-    # has to leave the cursor exactly where it is.
-    g.run(30, "U")
-    g.run(14)
-    check((g.cursor_xy(), g.var("cursor")) == ((16, 0), 0),
-          "holding UP off square 0 leaves the cursor on square 0 (%r, sq %d)"
-          % (g.cursor_xy(), g.var("cursor")))
-    check(hl_cells(g) == [], "and still lights nothing up (%r)" % (hl_cells(g),))
-
-    # A held direction repeats: one step stops on square 5 (itself selectable,
-    # a black man with two empty squares ahead), the next on square 9.  Held
-    # long enough for several of the walk's 8-frame repeat notches to fall
-    # inside the hold, so this does not depend on where the divider lands.
-    g.run(150, "D")
-    g.run(14)
-    check(g.var("cursor") == 9,
-          "holding DOWN walks 0 -> 5 -> 9 (%d)" % g.var("cursor"))
-    check(g.cursor_xy() == (16 * sq_col(9), 16 * sq_row(9)),
-          "and the sprite followed it to cell(2, 3) = OAM (48, 32) (%r)"
-          % (g.cursor_xy(),))
-
     # --- select ----------------------------------------------------------
+    set_cursor(g, 9)
     tap(g, "A")
     check(g.var("sel") == 9, "A picks up square 9 (%d)" % g.var("sel"))
     check(g.var("state") == ST_TARGET,
@@ -544,7 +641,7 @@ def p3_select_and_highlight(g):
           "B drops the piece (%#x, state %d)"
           % (g.var("sel"), g.var("state")))
     check(hl_cells(g) == [], "0 highlights after B (%r)" % (hl_cells(g),))
-    check(g.var("cursor") == 9 and g.cursor_xy() == (48, 32),
+    check(g.var("cursor") == 9 and g.cursor_xy() == (16 * sq_col(9), 16 * sq_row(9)),
           "the cursor never left the piece it was on - square 9 (%r)"
           % (g.cursor_xy(),))
 
@@ -564,12 +661,23 @@ def p3_select_and_highlight(g):
     check(piece_kinds(g) == {(0, 1): 0, (2, 3): 0, (3, 2): 1, (3, 4): 1},
           "the screen followed the board write - black men on sq 0 and 9, "
           "white on sq 13 and 14 (%r)" % (sorted(piece_kinds(g).items()),))
+    # The walk may rest on bare board, but never on a piece it cannot use.  UP
+    # from 9 is DIR_NW and lands on 5, which is empty; UP again is 0, the black
+    # man who must not be pickable, so he is stepped over and - the board
+    # ending there - the cursor holds on 5.  A on 5, an empty square, then
+    # picks up nothing, and only then is the cursor put back on 9.
     g.run(150, "U")
-    check(g.var("cursor") == 9,
-          "walking UP from 9 cannot reach square 0: 9 -NW-> 5 is empty, then 0 "
-          "holds a black man that is not selectable, then the board ends.  A "
-          "walk that lands on 'my man' stops on square 0 (%d)"
-          % g.var("cursor"))
+    check(g.var("cursor") == 5,
+          "UP from 9 lands on the empty square 5 (%d)" % g.var("cursor"))
+    g.run(150, "U")
+    check(g.var("cursor") == 5,
+          "UP again steps over the man on 0 - not selectable, so not a landing "
+          "square - rather than resting on 'my man' (%d)" % g.var("cursor"))
+    tap(g, "A")
+    check(g.var("sel") == NO_SQ and g.var("state") == ST_SELECT,
+          "and A on the bare square picks nothing up (%#x, %d)"
+          % (g.var("sel"), g.var("state")))
+    set_cursor(g, 9)
     tap(g, "A")
     hl = hl_cells(g)
     check(g.var("sel") == 9 and g.var("state") == ST_TARGET,
@@ -637,18 +745,17 @@ def p4_move_applied(g):
 
     # Square 0 holds a black man with no legal move at the start position -
     # p3_select_and_highlight exists to make exactly that point - so the cursor
-    # has to walk off it before there is anything to pick up.
-    g.run(150, "D")               # 0 -SE-> 5 -SE-> 9, same walk as p3
-    g.run(14)
-    check(g.var("cursor") == 9, "the cursor walked to square 9 (%d)" % g.var("cursor"))
+    # is placed rather than walked there: this check is about playing a move,
+    # and p3 is the one that owns the walk.
+    set_cursor(g, 9)
+    check(g.var("cursor") == 9, "the cursor is on square 9 (%d)" % g.var("cursor"))
     tap(g, "A")
     check(g.var("sel") == 9 and g.var("state") == ST_TARGET,
           "A picks square 9 up (%d, state %d)" % (g.var("sel"), g.var("state")))
 
     # 9's legal moves are to 13 and 14 (NEIGH[9] = {5, 6, 13, 14} for NW NE SW
     # SE), so LEFT - main.c's DIR_SW - lands on 13 in one hop.
-    g.run(30, "L")
-    g.run(14)
+    step(g, "L")
     check(g.var("cursor") == 13,
           "LEFT walks the cursor from 9 onto square 13 (%d)" % g.var("cursor"))
     check(g.cursor_xy() == (16 * sq_col(13), 16 * sq_row(13)),
@@ -725,8 +832,7 @@ def p4_mandatory_capture(g):
 
     # Park the cursor on square 9 first, from the start position, so the board
     # write below does not also have to move it.
-    g.run(150, "D")
-    g.run(14)
+    set_cursor(g, 9)
     check(g.var("cursor") == 9, "the cursor is parked on square 9 (%d)"
           % g.var("cursor"))
 
@@ -767,8 +873,7 @@ def p4_mandatory_capture(g):
           "the two landing squares light up - sq 16 and sq 18, behind the men "
           "they take (%r)" % (hl,))
 
-    g.run(30, "D")                # DOWN is main.c's DIR_SE: 9 -SE-> 14 -SE-> 18
-    g.run(14)
+    step(g, "D")                # DOWN is main.c's DIR_SE: 9 -SE-> 14 -SE-> 18
     check(g.var("cursor") == 18,
           "DOWN steps over the man on 14 and lands the cursor on 18 (%d)"
           % g.var("cursor"))
@@ -832,8 +937,7 @@ def p5_chain_continues(g):
     check(hl_cells(g) == [(5, 4)], "its landing square, 22, lights up (%r)"
           % (hl_cells(g),))
 
-    g.run(30, "D")                # DOWN is DIR_SE: 13 -SE-> 17 -SE-> 22
-    g.run(14)
+    step(g, "D")                # DOWN is DIR_SE: 13 -SE-> 17 -SE-> 22
     check(g.var("cursor") == 22,
           "DOWN steps over the man on 17 and lands the cursor on 22 (%d)"
           % g.var("cursor"))
@@ -882,8 +986,7 @@ def p5_chain_continues(g):
           % ([g.tile(x, y) for x, y in cells(4, 3)],))
 
     # --- hop two ---------------------------------------------------------
-    g.run(30, "L")                # LEFT is DIR_SW: 22 -SW-> 25 -SW-> 29
-    g.run(14)
+    step(g, "L")                # LEFT is DIR_SW: 22 -SW-> 25 -SW-> 29
     check(g.var("cursor") == 29,
           "LEFT steps over the man on 25 and lands the cursor on 29 (%d)"
           % g.var("cursor"))
@@ -938,8 +1041,7 @@ def p5_promotion_stops_chain(g):
     check(hl_cells(g) == [(7, 4)], "its landing square, 30, lights up (%r)"
           % (hl_cells(g),))
 
-    g.run(30, "D")                # DOWN is DIR_SE: 21 -SE-> 25 -SE-> 30
-    g.run(14)
+    step(g, "D")                # DOWN is DIR_SE: 21 -SE-> 25 -SE-> 30
     check(g.var("cursor") == 30,
           "DOWN steps over the man on 25 and lands the cursor on 30 (%d)"
           % g.var("cursor"))
@@ -1004,8 +1106,7 @@ def p6_play_it_out(g):
     """Play 0 -> 4: A to pick the man on 0 up, LEFT (main.c's DIR_SW) to walk
     the cursor onto its landing square, A to move it."""
     tap(g, "A")
-    g.run(30, "L")
-    g.run(14)
+    step(g, "L")
     tap(g, "A")
 
 
@@ -1092,8 +1193,9 @@ def p6_win_and_restart(g):
           % board_masks(g))
     check(g.var("state") == ST_SELECT,
           "the state machine is back in play (state %d)" % g.var("state"))
-    check(g.var("cursor") == 0,
-          "the cursor is back on square 0 (%d)" % g.var("cursor"))
+    check(g.var("cursor") == 8,
+          "the cursor is back on the start square, 8 - black's first man with "
+          "something to play (%d)" % g.var("cursor"))
     check(len(piece_kinds(g)) == 24,
           "all 24 men are drawn again (%d)" % len(piece_kinds(g)))
     check(g.find_text("BLACK WINS") == [],

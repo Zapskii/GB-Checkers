@@ -136,12 +136,23 @@ static uint8_t landable(uint8_t sq)
     return 0;
 }
 
-/* One d-pad step: hop along NEIGH in `dir` until a square that can be landed
- * on, at most WALK_STEPS hops.  Squares that cannot be landed on are stepped
- * *over* rather than landed on, and running out of board or of steps leaves the
- * cursor exactly where it was - so the cursor is never on a square it could not
- * have been put on deliberately.  Two hops is what a capture needs (over the
- * taken piece and onto the square behind it); four leaves room to spare. */
+/* One d-pad step: hop along NEIGH in `dir`, landing on the first square that is
+ * EMPTY or that is in the current move list, at most WALK_STEPS hops.  Squares
+ * that are neither are stepped *over*; running out of board or of steps leaves
+ * the cursor where it was.
+ *
+ * Empty squares are landable, and that is not a nicety - without it the game is
+ * unplayable.  The move list holds only the side's movable MEN (in ST_SELECT)
+ * or one piece's destinations (in ST_TARGET), and a walk may only travel along
+ * a single diagonal.  The four movable men at the start position sit on squares
+ * 8, 9, 10 and 11 - one row, two columns apart - so no straight diagonal line
+ * joins any two of them, and a cursor that could land only on the move list
+ * was trapped on whichever man it first reached: pick one piece or pick none.
+ * Letting it rest on bare board makes the whole board navigable while keeping
+ * the property that matters - it can never come to rest on a piece it cannot
+ * use, because those are occupied and not in the move list, so they are stepped
+ * over.  Two hops is what a capture needs (over the taken piece and onto the
+ * square behind it); four leaves room to spare. */
 static uint8_t walk(uint8_t from, uint8_t dir)
 {
     uint8_t sq, i;
@@ -156,15 +167,23 @@ static uint8_t walk(uint8_t from, uint8_t dir)
     for (i = 0; i < WALK_STEPS; i++) {
         sq = NEIGH[sq][dir];
         if (sq == NO_SQ) break;               /* off the board: stay put */
-        if (landable(sq)) return sq;
+        if (landable(sq) || !sq_occupant(&board, sq)) return sq;
     }
     return from;
 }
 
-/* U/D choose their diagonal by the vertical half and L/R by the horizontal
- * one: the board only joins squares diagonally, so every press has to pick a
- * diagonal, and these are the four.  A cell is never stepped into off-board
- * because NEIGH says NO_SQ there - this file does no row/col arithmetic. */
+/* Each d-pad key is one diagonal - the board has no other kind of neighbour, so
+ * every press has to pick one, and these are the four.  The mapping is the
+ * d-pad turned 45 degrees anticlockwise, which means UP and RIGHT both go UP
+ * the screen and DOWN and LEFT both go DOWN:
+ *
+ *        UP  up-left        RIGHT  up-right
+ *       LEFT down-left       DOWN  down-right
+ *
+ * and nothing moves straight sideways.  A player cannot guess this, so the
+ * README's controls table spells it out; keep the two in step.  A cell is never
+ * stepped into off-board because NEIGH says NO_SQ there - this file does no
+ * row/col arithmetic. */
 static uint8_t dir_of(uint8_t k)
 {
     if (k & J_UP)    return DIR_NW;
@@ -424,7 +443,10 @@ static void new_game(void)
 {
     board = board_init();
     side = SIDE_BLACK;        /* black moves first, as at the start position */
-    cursor = 0;               /* row 0, col 1 - a back-rank man, see probe P3 */
+    /* Parked, not placed: the main loop seats it on a square this side can
+     * actually use.  Square 0 holds a back-rank man with no legal move, so
+     * starting there means the first press of a new game does nothing. */
+    cursor = NO_SQ;
     refresh_moves();
 }
 
@@ -464,6 +486,13 @@ void main(void)
             /* This frame's legal moves, from this frame's board and this
              * frame's side, before input or the screen reads any of it. */
             compute_legal();
+            /* A parked cursor has nowhere to be: the first frame of a game,
+             * and the frame a turn passes on.  Seat it on the first square the
+             * side to move can actually use, so the player never has to press
+             * a direction just to find a piece.  It is set after
+             * compute_legal() because that is what fills the move list. */
+            if (state == ST_SELECT && cursor == NO_SQ && n_moves)
+                cursor = moves[0].from;
             handle_input();
         }
 
