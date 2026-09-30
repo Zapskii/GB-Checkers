@@ -47,14 +47,6 @@ MAP_W = 32
 BOARD_TW = BOARD_TH = 16        # tiles; 8x8 cells of 2x2 tiles
 BOARD_TILES = [(x, y) for y in range(BOARD_TH) for x in range(BOARD_TW)]
 
-# A d-pad hold long enough for the game to sample it exactly ONCE, i.e. one
-# walk() call and no repeat notch.  Measured against this ROM: 1..7 frames are
-# missed entirely, 9..25 all give exactly one step (8 -> 13 from the start
-# square).  12 sits in the middle of that plateau.  PyBoy's clocks are
-# unfaithful, so this is calibrated, not derived -- re-measure it if the main
-# loop's timing changes.
-STEP_HOLD = 12
-
 
 def glyph(c):
     if "A" <= c <= "Z":
@@ -390,8 +382,15 @@ def p2_start_position(g):
     wram = bytes(g.p.memory[WRAM0[0]:WRAM0[1]])
     hits = [WRAM0[0] + i for i in range(len(wram) - len(want) + 1)
             if wram[i:i + len(want)] == want]
-    check(hits == [addr], "WRAM holds exactly one start position, at the map's "
-                          "board 0x%04X (%r)" % (addr, [hex(h) for h in hits]))
+    # There are two by design now and both are named: the live board, and
+    # main.c's snapshot of what the last build was made from (see
+    # screen_stale()).  Anything ELSE holding these twelve bytes means main.c is
+    # drawing from a copy probe.py never looked at, which is what this is for.
+    if g.need("drawn_board"):
+        check(sorted(hits) == sorted({addr, g.addr["drawn_board"]}),
+              "WRAM holds the start position exactly twice: the board at 0x%04X "
+              "and the drawn snapshot at 0x%04X (%r)"
+              % (addr, g.addr["drawn_board"], [hex(h) for h in hits]))
 
 
 # ---------------------------------------------------------------- P3 --------
@@ -442,12 +441,14 @@ def tap(g, buttons, hold=24, settle=14):
     """Hold a button for a while, then let the screen catch up.
 
     Both numbers are measured against this ROM, not guessed.  main.c's loop
-    advances ONE iteration per ~8.6 emulator frames: read `frame` over 60
-    emulator frames and it goes up by 7.  (PyBoy's clocks are unfaithful --
-    CLAUDE.md says so and this is what it looks like from here; p1 already hit
-    it, which is why it holds START for 20 frames instead of tapping it.)
-    So a 1-2 frame tap falls between two of the game's samples and is never
-    seen at all; a 24 frame hold is 2-3 samples, which always catches the edge.
+    advances one iteration per ~3 emulator frames in play (~1 on the title
+    screen), so `frame` goes up about 20 times a second.  (Counting it as a
+    byte over a window wider than 256 iterations wraps it: that is how the rate
+    here was first misread.)  A 1-2 frame tap can fall between two of the game's
+    samples; 24 frames is ~8 samples, which always catches the edge, and a real
+    human tap (~100 ms) is ~2 samples, so it lands too.
+    Only edge-triggered buttons come through here.  A d-pad press held this long
+    is long enough to catch a repeat, so the d-pad goes through step().
     The second number is the same fact seen from the other side: the tilemap
     the probe reads is whatever was blitted LAST, so it trails main.c's statics
     by an iteration -- WRAM is the fresh view, the screen needs settling."""
@@ -471,17 +472,63 @@ def set_cursor(g, sq):
 
 
 def step(g, key):
-    """One d-pad press, one walk() call - the calibrated hold, plus a redraw.
+    """One d-pad press that the game certainly sampled, and sampled once.
 
-    Use this and not a longer hold.  main.c walks again every REPEAT_DIV (8)
-    game iterations, which is ~69 emulator frames, so a 30 frame hold catches
-    one repeat about 40% of the time - and a repeat is a SECOND step along the
-    same diagonal.  That used to be harmless only because a repeat could not
-    land on bare board; now that it can, a 30 frame hold walks off the square
-    under test whenever the divider happens to fall inside the hold.
+    A fixed-length hold is a gamble on where the loop's frame counter sits, and
+    both ways of losing it are real.  Too short and the press falls entirely
+    between two of the game's samples and nothing happens at all.  Too long and
+    it catches a repeat, which is a SECOND walk() along the same diagonal.  This
+    file used to hold a calibrated 12 frames, measured when the loop ran at 2
+    frames an iteration; the loop runs at 3 now, and at 3 that hold steps twice
+    and every walk assertion below lands a square past its target.  (Before
+    REPEAT_DIV was counted from the press it was worse than "too long": see
+    p8_one_step_per_tap.)
+
+    So: press for ONE frame and watch `frame`.  main.c reads the joypad and
+    increments `frame` in the same iteration, with nothing in between, so the
+    counter having moved during the pressed frame means that read saw the key
+    down.  One frame is shorter than one turn of the loop, so it cannot be
+    sampled twice - and with the key up the frame before, that one sample takes
+    the `pressed` branch rather than the repeat branch, which is what makes this
+    exactly one walk() call.
+    One frame is shorter than a *person's* press, though, so nothing here covers
+    what a tap does; p8 is the check for that.
     """
-    g.run(STEP_HOLD, key)
-    g.run(16)
+    for _ in range(60):
+        before = g.var("frame")
+        g.run(1, key)
+        if g.var("frame") != before:
+            break
+    else:
+        raise AssertionError("the game never sampled a %r press in 60 frames" % key)
+    g.run(16)           # the tilemap trails main.c's statics by an iteration
+
+
+def tap_at_notch(g, key, tap=6):
+    """A person's tap - 6 frames, ~100 ms - aimed at the one place the buggy
+    repeat rule fired.
+
+    The rule was `(frame & (REPEAT_DIV - 1)) == 0` with the key still down, and
+    `frame` is at an arbitrary value when a player presses: so a tap whose
+    SECOND turn of the loop landed on a multiple of REPEAT_DIV walked two
+    squares, and which taps did depended on nothing the player could see.  Aim
+    at `frame & 7 == 6` and the next turn of the loop is that multiple, so a
+    perfectly ordinary tap does it every time instead of one time in eight.
+    Measured on the build without the fix, this aim and this hold give 17 (two
+    squares); with the fix, 13.
+
+    Aiming first, with the key up, is what keeps this a tap: the aiming costs
+    the player nothing, and 6 frames is a real press.  The aim does couple the
+    check to the loop's rate - the notch has to still be ~2 turns away when the
+    press starts - so if the loop rate changes, re-measure rather than assume.
+    """
+    for _ in range(40):                     # aiming: the key is UP
+        if (g.var("frame") & 7) == 6:
+            break
+        g.run(1)
+    g.run(tap, key)
+    g.run(16)                               # the tilemap trails the statics
+    return tap
 
 
 def p3_select_and_highlight(g):
@@ -542,15 +589,14 @@ def p3_select_and_highlight(g):
     # four movable pieces could not be played at all.
     #
     # So walk the graph for real and require all four.  One press is one
-    # walk() call (STEP_HOLD), and every square reached is expanded in turn.
+    # walk() call, and every square reached is expanded in turn.
     seen, frontier = {c0}, [c0]
     while frontier:
         nxt = []
         for s in frontier:
             for k in "UDLR":
                 set_cursor(g, s)
-                g.run(STEP_HOLD, k)
-                g.run(16)
+                step(g, k)
                 t = g.var("cursor")
                 if t not in seen:
                     seen.add(t)
@@ -1217,6 +1263,78 @@ def p6_win_and_restart(g):
           "state %d)" % (board_masks(g) + (g.var("side"), g.var("state"))))
 
 
+# ---------------------------------------------------------------- P7 --------
+def p7_responsiveness(g):
+    """The loop turns over fast enough to catch a human keypress.
+
+    This is the check the game shipped without, and its absence cost a whole
+    play-test: rebuilding and blitting the screen on every frame - including the
+    frames where the player was only thinking - put the loop at 8.6 emulator
+    frames an iteration, so `pressed` was sampled once every 143 ms and an
+    ordinary tap (~100 ms) fell between two samples and did nothing at all.
+    Nothing else here can see that.  Every other check reads state, and the
+    state was right the whole time; it was simply read too slowly to hear the
+    buttons, and "I can't get a piece to move" is what that looks like.
+
+    Iterations are counted by sampling `frame` once per tick and SUMMING the
+    gaps.  Read as a byte across the window it wraps at 256, which is how this
+    same loop was once measured as running at 30 a second when it was at 7.
+    """
+    print("P7 loop rate")
+    g.start()
+    if not g.need("frame"):
+        return
+    prev, total, ticks = g.var("frame"), 0, 60
+    for _ in range(ticks):
+        g.p.tick(1, True)
+        cur = g.var("frame")
+        total += (cur - prev) % 256
+        prev = cur
+    check(total > 0, "the main loop is running at all (%d iterations in %d "
+                     "frames)" % (total, ticks))
+    if not total:
+        return
+    per = ticks / total
+    # A human tap is ~6 frames (100 ms) and a press is dropped only if it falls
+    # entirely between two of the loop's samples, so the gap between samples is
+    # the whole question.  Four frames is comfortably under a tap; the loop runs
+    # at 3.  The always-redraw loop this replaced was at 8.6 and fails here by a
+    # mile, which is the point of the number being 4 and not 9.
+    check(per <= 4.0, "the loop turns over in %.2f emulator frames (%.0f Hz), so "
+                      "input is sampled often enough to catch a tap - not the "
+                      "8.6 frames (7 Hz) that dropped them (%d iterations in %d "
+                      "frames)" % (per, total * 59.7 / ticks, total, ticks))
+
+
+# ---------------------------------------------------------------- P8 --------
+def p8_one_step_per_tap(g):
+    """A tap walks one square.  Never two, never none.
+
+    This pins one line of main.c, and it is the second half of "I can't get a
+    piece to move".  The repeat was tested against the free-running `frame`
+    counter rather than against how long the key had been held, so a press that
+    happened to land near a multiple of REPEAT_DIV took the repeat branch on its
+    very next turn of the loop and walked TWO squares.  A cursor that jumps two
+    at a time is as unplayable as one that never moves - and it got worse the
+    moment P7 made the loop turn over fast enough to sample a tap at all, which
+    is why the check lives here and not in P3.
+    """
+    print("P8 one tap, one square")
+    g.start()
+    if not g.need("frame", "cursor"):
+        return
+    n = tap_at_notch(g, "D")
+    check(g.var("cursor") == 13,
+          "a %d-frame D tap from square 8 lands the cursor one square on, on "
+          "13 - not two on 17, and not still on 8 (%d)" % (n, g.var("cursor")))
+    # ... and holding is still a hold.  The fix must not have cured the double
+    # step by capping the d-pad at one square per press: a cursor that has to
+    # be tapped four times to cross the board is its own regression.
+    g.run(90, "D")
+    check(g.var("cursor") > 13,
+          "and a held D still repeats past it (%d)" % g.var("cursor"))
+
+
 CHECKS = [("p1_boot_title_board", p1_boot_title_board),
           ("p2_start_position", p2_start_position),
           ("p3_select_and_highlight", p3_select_and_highlight),
@@ -1224,7 +1342,9 @@ CHECKS = [("p1_boot_title_board", p1_boot_title_board),
           ("p4_mandatory_capture", p4_mandatory_capture),
           ("p5_chain_continues", p5_chain_continues),
           ("p5_promotion_stops_chain", p5_promotion_stops_chain),
-          ("p6_win_and_restart", p6_win_and_restart)]
+          ("p6_win_and_restart", p6_win_and_restart),
+          ("p7_responsiveness", p7_responsiveness),
+          ("p8_one_step_per_tap", p8_one_step_per_tap)]
 
 
 def main(rom, mapfile):

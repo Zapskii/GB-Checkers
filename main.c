@@ -50,19 +50,21 @@
 /* The cursor walks square to square along NEIGH, so it can step over squares
  * that cannot be picked up right now - with mandatory capture most of them
  * cannot - and WALK_STEPS caps how far one press may travel.  A held direction
- * steps again every REPEAT_DIV frames. */
+ * steps again every REPEAT_DIV turns of the loop. */
 #define WALK_STEPS 4u
 #define REPEAT_DIV 8u
 
 typedef enum { ST_TITLE, ST_SELECT, ST_TARGET, ST_OVER } State;
 
 /* ----------------------------------------------------------------- state
- * The state machine and the rules engine's board.  The screen has no state of
- * its own: every frame rebuilds it from `board` and from the move list below,
- * so there is nothing to keep in sync and nothing a stale cache can leave
- * behind. */
+ * The state machine and the rules engine's board.  The screen holds no state of
+ * its own: it is a function of these, rebuilt from `board` and from the move
+ * list below whenever either could have changed, so there is nothing to keep in
+ * sync and nothing a stale cache can leave behind.  The one thing remembered is
+ * what the last build was made FROM - see screen_stale(), and the probe check
+ * that holds it honest. */
 static State   state;
-static uint8_t keys, pressed, prev_keys, frame;
+static uint8_t keys, pressed, prev_keys, frame, repeat;
 static Board   board;
 static uint8_t side;          /* whose turn it is: SIDE_BLACK / SIDE_WHITE */
 
@@ -290,12 +292,24 @@ static void handle_input(void)
 
     dir = dir_of(keys);
 
-    /* A fresh press steps once, at once; a held direction steps again on the
-     * divider.  Splitting them keeps one press to one step whatever the frame
-     * counter happens to be. */
+    /* A fresh press steps once, at once; a direction held for REPEAT_DIV turns
+     * of the loop steps again, and keeps stepping for as long as it is held.
+     * The count is TURNS SINCE THE PRESS, not the frame counter: `frame` is
+     * free-running, so testing `(frame & (REPEAT_DIV - 1)) == 0` fires whenever
+     * the counter happens to land on a multiple - which a press can hit on its
+     * very next turn.  That made one tap step two squares, about one tap in
+     * eight, and more often once the loop got faster.  Counting from the press
+     * makes a tap exactly one step, always. */
     if (dir != NO_SQ) {
-        if (pressed & (J_UP | J_DOWN | J_LEFT | J_RIGHT)) cursor = walk(cursor, dir);
-        else if ((frame & (REPEAT_DIV - 1u)) == 0)       cursor = walk(cursor, dir);
+        if (pressed & (J_UP | J_DOWN | J_LEFT | J_RIGHT)) {
+            cursor = walk(cursor, dir);
+            repeat = 0;
+        } else if (++repeat >= REPEAT_DIV) {
+            cursor = walk(cursor, dir);
+            repeat = 0;
+        }
+    } else {
+        repeat = 0;             /* nothing held: the next press starts clean */
     }
 
     if (pressed & J_A) {
@@ -341,6 +355,54 @@ static void text_v(uint8_t col, uint8_t row, const char *s)
 {
     uint8_t *p = &hudbuf[row * HUD_TW + col];
     while (*s) { *p = glyph(*s++); p += HUD_TW; }
+}
+
+/* ------------------------------------------------------------- what's drawn
+ * Still no state of the screen's own: this only remembers the values the LAST
+ * build was made from, so a frame whose build would write the same bytes again
+ * can skip writing them.  Measured on the DMG, rebuilding and blitting the
+ * whole screen is about five of the eight emulator frames an iteration used to
+ * take, and doing that on the frames where the player is only thinking put a
+ * 135 ms gap between input samples - long enough that an ordinary tap fell
+ * between two of them and did nothing at all.  That is the whole of the
+ * complaint this exists to fix.
+ *
+ * It is not a cache of a RULE.  compute_legal() is still called from scratch
+ * every frame, and the move list it fills is never carried over; what is being
+ * skipped here is writing bytes that are already in VRAM.  Every value the
+ * build_* functions read is in this list, so the check cannot miss a change:
+ * add a global to the screen and it has to be added here too.  The probe's
+ * tilemap checks are what pin it - they read the screen and the statics
+ * together. */
+static Board   drawn_board;
+static uint8_t drawn_side, drawn_state, drawn_sel, drawn_chain;
+static uint8_t drawn_once;      /* 0 until the first build has happened */
+
+static uint8_t screen_stale(void)
+{
+    /* The screen has to be painted once before "nothing changed" means
+     * anything: at boot every static above is zero, and so are `board`, `side`,
+     * `state`, `sel` and `chain_sq`, so the comparison would call the title
+     * screen already drawn and leave the tilemap as the PPU powered up with.
+     * That is not hypothetical - it is what the first version of this did, and
+     * the probe's title-screen check is what caught it. */
+    if (!drawn_once) return 1;
+    if (drawn_board.black != board.black) return 1;
+    if (drawn_board.white != board.white) return 1;
+    if (drawn_board.kings != board.kings) return 1;
+    if (drawn_side != side || drawn_state != state) return 1;
+    if (drawn_sel != sel || drawn_chain != chain_sq) return 1;
+    return 0;
+}
+
+static void screen_drawn(void)
+{
+    drawn_board = board;
+    drawn_side  = side;
+    drawn_state = state;
+    drawn_sel   = sel;
+    drawn_chain = chain_sq;
+    drawn_once  = 1;
 }
 
 static void build_title(void)
@@ -472,6 +534,7 @@ void main(void)
     frame = 0;
 
     while (1) {
+        uint8_t stale;
         keys = joypad();
         pressed = keys & ~prev_keys;
         prev_keys = keys;
@@ -497,22 +560,51 @@ void main(void)
         }
 
         /* Build the frame first, blit it second: the VRAM writes then land in
-         * the VBlank window instead of being dropped by the PPU. */
-        if (state == ST_TITLE) {
-            build_title();
-        } else {
-            build_board();
-            if (sel != NO_SQ) draw_highlights();
-            draw_pieces();
-            move_cursor();
-            /* Over the top of the drawn pieces: the result is the one thing
-             * on the board in ST_OVER, and the pieces are still worth seeing
-             * underneath it. */
-            if (state == ST_OVER) build_status();
+         * the VBlank window instead of being dropped by the PPU.  Skipped
+         * entirely on a frame that would build what is already there - see
+         * screen_stale(). */
+        stale = screen_stale();
+        if (stale) {
+            /* `moves` was filled at the top of this iteration, from the
+             * position BEFORE handle_input ran - that is the order the
+             * selection needs, so it cannot move - and on a frame where input
+             * changed the board it is now one position out of date.  The
+             * highlights are read off it, so without this they light the square
+             * the piece has just LEFT: mid-chain, a hop from 13 to 22 leaves
+             * `moves` still holding 13->22 and draw_highlights() paints the
+             * destination of a move that has already been played.  A loop that
+             * redrew every frame never had to say this out loud - the next
+             * frame's compute_legal() was the repair, one frame late. */
+            compute_legal();
+            if (state == ST_TITLE) {
+                build_title();
+            } else {
+                build_board();
+                if (sel != NO_SQ) draw_highlights();
+                draw_pieces();
+                /* Over the top of the drawn pieces: the result is the one thing
+                 * on the board in ST_OVER, and the pieces are still worth seeing
+                 * underneath it. */
+                if (state == ST_OVER) build_status();
+            }
+            build_hud();
         }
-        build_hud();
+        /* The sprite is two OAM bytes and is written every frame whatever the
+         * tilemap is doing, so a write the PPU drops mid-scanline is corrected
+         * on the next one rather than leaving the cursor behind.  Not on the
+         * title screen, where there is no cursor to place. */
+        if (state != ST_TITLE) move_cursor();
+
+        /* One wait per iteration, whether or not anything was drawn: `frame`
+         * divides REPEAT_DIV, so it has to keep counting frames.  A held
+         * direction that repeated once per loop turn would cross the whole
+         * board on one press. */
         wait_vbl_done();
-        set_bkg_tiles(0, 0, BOARD_TW, BOARD_TH, mapbuf);
-        set_bkg_tiles(HUD_X, 0, HUD_TW, HUD_TH, hudbuf);
+
+        if (stale) {
+            set_bkg_tiles(0, 0, BOARD_TW, BOARD_TH, mapbuf);
+            set_bkg_tiles(HUD_X, 0, HUD_TW, HUD_TH, hudbuf);
+            screen_drawn();
+        }
     }
 }
