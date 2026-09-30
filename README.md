@@ -5,11 +5,12 @@ with no game engine. Same lineage as GB-Protector: procedural art via a
 Python script, and hardware-independent logic in a `sim.h` that's tested
 on the host before anything touches GBDK.
 
-**Current stage: Milestone 2 in progress - there is a 1-player game.** Milestone 1
+**Current stage: Milestone 2 complete.** Milestone 1
 is complete: a full two-player pass-and-play game with title screen, board and
 cursor, mandatory capture, multi-jump chains, promotion, win detection and
 restart. Milestone 2 adds an opponent: pick **1 PLAYER** on the title screen and
-the machine plays white, the human black. `make` builds the ROM, `make test` runs
+the machine plays white, the human black, with the moves making their own
+noises. `make` builds the ROM, `make test` runs
 the rules engine's unit tests on the host, and `make probe` drives the ROM in a
 headless emulator and asserts on what it did.
 
@@ -99,6 +100,21 @@ piece blocked. The status row says who won and START (or B) starts a new game.
   completes and the other side is handed the move, so a chain that can
   continue has not ended a turn and cannot lose the game yet.
 
+## Super Game Boy
+
+On an SGB the board is framed by `art/border_sgb.png`, sent at boot. It is
+drawn once and only when `sgb_check()` passes, so an ordinary DMG boots exactly
+as it did before. The one thing worth knowing: `set_sgb_border()` loads the
+border's tiles into the tile bank the board uses, so `main.c` reloads `gfx_tiles`
+straight afterwards - this game's boot path does not otherwise touch the bank at
+that point.
+
+Nothing automated can see it. PyBoy emulates a DMG, where the whole path is
+skipped, and a ROM built without `-Wm-ys` has its SGB packets discarded so mGBA
+emulates a plain DMG too. `make probe` therefore asserts the ROM's bytes (the SGB
+flag, the old-licensee byte, and that the border data is linked in whole), and
+whether the artwork looks right is an mGBA-with-SGB check by eye.
+
 ## Not implemented yet (by design, see the plan)
 
 - Difficulty levels, or a machine that plays black. There is one depth, chosen
@@ -113,8 +129,7 @@ piece blocked. The status row says who won and START (or B) starts a new game.
   this scope, and worth stating rather than leaving to be discovered.
 - Save/load to cartridge SRAM (needs a battery-backed MBC - a hardware/BOM
   decision, not just a code change).
-- An SGB border, and a win jingle. The moves themselves already make their
-  three noises.
+- A win jingle. The moves themselves already make their three noises.
 
 ## Build
 
@@ -123,6 +138,7 @@ piece blocked. The status row says who won and START (or B) starts a new game.
     make probe    # headless PyBoy checks against the built ROM
     make geom     # regenerate board_geom.h from boardgen.py (committed)
     make gfx      # regenerate gfx.h from mkgfx.py (committed)
+    make border   # regenerate border_data.c from art/border_sgb.png (committed)
     make usage    # ROM/RAM headroom
     make image    # build the Docker toolchain image (only needed once)
     make clean
@@ -140,22 +156,32 @@ list the statics the probe reads), so if you want the release binary, run
 | `board_geom.h`     | Generated, committed - a plain `make test` needs no Python   |
 | `mkgfx.py`         | Generates `gfx.h` (tile art, ids, the cursor sprite)          |
 | `gfx.h`            | Generated, committed. Included by `main.c` only               |
+| `art/border_sgb.png` | The SGB border artwork (256x224, game area transparent)     |
+| `border_data.c/.h` | Generated from that PNG, committed, like `gfx.h`              |
+| `sgb_border.c/.h`  | Sends the CHR_TRN/PCT_TRN packets; byte-identical to the siblings |
 | `sim.h`            | Pure rules engine (move gen, capture, chains, promotion) and the search; no GBDK |
 | `tests/test_sim.c` | Geometry checks, hand-built positions, and random self-play fuzzing |
 | `tools/probe.py`   | Headless emulator checks: the tilemap, and `main.c`'s own statics |
 
 ## Headroom
 
-`make usage` on the release ROM:
+`make usage` on the `-debug` build (the target builds `sym` first, since
+`romusage` reads the linker map):
 
-| Bank    | Size  | Used       | Free       |
-|---------|-------|------------|------------|
-| ROM_0   | 16384 | 9411 (57%) | 6973 (43%) |
-| WRAM_LO | 4096  | 1556 (38%) | 2540 (62%) |
+| Bank    | Size  | Used        | Free        |
+|---------|-------|-------------|-------------|
+| ROM_0   | 16384 | 16043 (98%) | 341 (2%)    |
+| ROM_1   | 16384 | 2125 (13%)  | 14259 (87%) |
+| WRAM_LO | 4096  | 1557 (38%)  | 2539 (62%)  |
 
 The AI is most of the WRAM: its search arena is `AI_MAX_PLY` `AiFrame`s, about a
 kilobyte, held at file scope in `main.c` rather than on the stack - a kilobyte of
 stack on a DMG is not "large", it is a crash.
+
+Bank 0 is where the room runs out. The SGB border's blobs (about 6.2 KB of tiles,
+map and palettes) are linked in beside the code, and bank 1 is nearly empty
+because nothing puts anything there yet. Anything substantial from here - link
+cable play, move animation, undo - has to be banked rather than just written.
 
 ## How the board is represented
 
