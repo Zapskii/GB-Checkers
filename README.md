@@ -178,18 +178,24 @@ list the statics the probe reads), so if you want the release binary, run
 
 | Bank    | Size  | Used        | Free        |
 |---------|-------|-------------|-------------|
-| ROM_0   | 16384 | 16043 (98%) | 341 (2%)    |
-| ROM_1   | 16384 | 2125 (13%)  | 14259 (87%) |
+| ROM_0   | 16384 | 10425 (64%) | 5959 (36%)  |
+| ROM_1   | 16384 | 7744 (47%)  | 8640 (53%)  |
 | WRAM_LO | 4096  | 1557 (38%)  | 2539 (62%)  |
 
 The AI is most of the WRAM: its search arena is `AI_MAX_PLY` `AiFrame`s, about a
 kilobyte, held at file scope in `main.c` rather than on the stack - a kilobyte of
 stack on a DMG is not "large", it is a crash.
 
-Bank 0 is where the room runs out. The SGB border's blobs (about 6.2 KB of tiles,
-map and palettes) are linked in beside the code, and bank 1 is nearly empty
-because nothing puts anything there yet. Anything substantial from here - link
-cable play, move animation, undo - has to be banked rather than just written.
+The SGB border's blobs are why bank 1 is no longer empty. They are 5920 bytes
+of tiles, 1792 of map and 32 of palettes - 7744 in all - and they sit at 0x4000
+and above, placed there by `#pragma bank 1` in `border_data.c` (which `make
+border` writes, via `png2asset -b 1`) and the `-Wl-b_CODE_1=0x4000` area in
+`LCCFLAGS`. The cart is ROM-only, so bank 1 is permanently mapped across
+0x4000-0x7FFF and `main.c` hands `set_sgb_border()` plain pointers: no
+`SWITCH_ROM`, no `BANKED`, no MBC. Before P15 those same blobs were linked in
+beside the code in bank 0, which is where the room was running out. Anything
+substantial from here - link cable play, move animation, undo - can take the
+same route.
 
 ## How the board is represented
 

@@ -2077,6 +2077,13 @@ OLD_LICENSEE = 0x014B           # 0x33 = "SGB"
 # the data is in the ROM at FULL length rather than just named in the map.
 BORDER_TILES_BYTES = 5920       # border_data_tiles[]
 BORDER_PAL_BYTES = 32           # border_data_palettes: 16 palette_color_t
+BORDER_MAP_BYTES = 1792         # border_data_map[] (and its attribute alias)
+# P15: bank 1, the 0x4000 bank window.  The cart is ROM-only, so bank 1 is
+# permanently mapped and main.c's plain pointers read it -- which is why the
+# blobs being ABOVE 0x4000 is a placement that can be asserted and not just a
+# bank number that a switch would have to select at runtime.
+BANK1_BASE = 0x4000
+BANK1_END = 0x8000
 
 
 def parse_border_map(path):
@@ -2110,10 +2117,24 @@ def p13_sgb_border(g):
       * 0x0146 == 0x03, the SGB flag.
       * 0x014B == 0x33, old licensee "SGB".
       * border_data is linked in at its full length.
+      * and all three blobs sit in bank 1, at 0x4000 or above (P15).
 
     The gate is the third: P12's ROM has no border_data module at all, so the
     map parse comes back empty and this exits 1 (measured against a P12-shaped
     map: "FAIL border_data_tiles is linked in (found at nowhere)" x3).
+
+    P15's gate is the fourth, and it is the ADDRESS, never a missing symbol:
+    P14's ROM links the same three symbols with the same sizes and the same
+    spacing, only in bank 0, so every check above it passes.  Reverting the
+    placement -- `#pragma bank 1` out of border_data.c, -Wl-b_CODE_1=0x4000 out
+    of LCCFLAGS -- reproduces P14's ROM byte for byte (its release md5 comes
+    back, 73a78cf37d7babac102072de24a76657), and the map then reads palettes
+    0x2778, tiles 0x2798, map 0x3EB8, so this exits 1 with the three MEASURED
+    lines below and not with "symbol absent":
+
+        FAIL  border_data_palettes is in bank 1 (0x2778 < 0x4000)
+        FAIL  border_data_tiles is in bank 1 (0x2798 < 0x4000)
+        FAIL  border_data_map is in bank 1 (0x3EB8 < 0x4000)
 
     0x0146 is the MUTATION CONTROL.  -Wm-ys has been in LCCFLAGS since P1, so
     the byte is already 0x03 on P12's ROM and cannot gate anything -- deleting
@@ -2139,6 +2160,16 @@ def p13_sgb_border(g):
     if not all(n in b for n in ("tiles", "map", "palettes")):
         return
 
+    # P15.  The three blobs are in bank 1, not beside the code in bank 0.  The
+    # comparison is spelled out rather than implied so that the failure reads
+    # as the address it is -- "0x2798 < 0x4000" -- and not as a symbol that a
+    # later phase might have renamed.
+    for name in ("palettes", "tiles", "map"):
+        check(b[name] >= BANK1_BASE,
+              "border_data_%s is in bank 1 (0x%04X %s 0x%04X)"
+              % (name, b[name], ">=" if b[name] >= BANK1_BASE else "<",
+                 BANK1_BASE))
+
     # Non-empty means at full length: the tile blob runs right up to the map
     # blob in the map's own listing, and a truncated or stubbed array would
     # leave a gap that is not 5920.
@@ -2148,8 +2179,15 @@ def p13_sgb_border(g):
     check(b["tiles"] - b["palettes"] == BORDER_PAL_BYTES,
           "the palette blob is all %d bytes (palettes 0x%04X -> tiles 0x%04X)"
           % (BORDER_PAL_BYTES, b["palettes"], b["tiles"]))
-    check(b["tiles"] + BORDER_TILES_BYTES <= len(rom),
-          "and the blobs sit inside the ROM (%d bytes)" % len(rom))
+    # Stronger than "inside the ROM": the payload ends below 0x8000, so nothing
+    # spills past the 32 KB a ROM-only cart maps, and the ROM is still the
+    # 32768 bytes such an image pads to.  Deliberately says nothing about WHICH
+    # bank -- on P14's ROM this one passes with the blobs at 0x3EB8, exactly as
+    # it should, and the address checks above are the ones carrying the claim.
+    check(b["map"] + BORDER_MAP_BYTES <= BANK1_END and len(rom) == 0x8000,
+          "nothing spills past 0x%04X, and the ROM is still 32768 bytes "
+          "(map ends 0x%04X, ROM %d bytes)"
+          % (BANK1_END, b["map"] + BORDER_MAP_BYTES, len(rom)))
 
 
 # ---------------------------------------------------------------- P14 -------

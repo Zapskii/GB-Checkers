@@ -41,7 +41,13 @@ else
   PY ?= python3
 endif
 
-LCCFLAGS = -Wm-ys -Wm-yn"DRAUGHTS" -Wl-m -Wl-j
+# -Wl-b_CODE_1=0x4000 defines a second code area, bank 1, at the 0x4000 bank
+# window.  The cart is ROM-only (no -Wl-yt), so bank 1 is permanently mapped
+# there and a plain 16-bit pointer reads it: no SWITCH_ROM, no BANKED, no MBC.
+# border_data.c carries `#pragma bank 1`, which is what puts its arrays in
+# _CODE_1 rather than _CODE.  That pragma is what defines the area -- take it
+# out and the linker warns "No definition of area _CODE_1".
+LCCFLAGS = -Wm-ys -Wm-yn"DRAUGHTS" -Wl-m -Wl-j -Wl-b_CODE_1=0x4000
 
 all: $(ROM)
 
@@ -87,9 +93,13 @@ gfx:
 # plain `make` needs no Python. -pack_mode sgb is what gets the SGB layout --
 # 4bpp tiles, a 256x224 map, one attribute byte per cell -- instead of a GB
 # screen; -use_map_attributes keeps that byte, which is the per-cell palette.
+# -b 1 is what makes png2asset write `#pragma bank 1` at the top of the output;
+# without it the blobs land back in bank 0 and the probe's p13 address check
+# fails.  Regenerating is therefore safe -- the pragma comes from here, not
+# from hand-editing the generated file.
 border:
 	$(RUN) $(P2A) art/border_sgb.png -map -bpp 4 -max_palettes 4 \
-	      -pack_mode sgb -use_map_attributes -c border_data.c
+	      -pack_mode sgb -use_map_attributes -b 1 -c border_data.c
 
 # romusage reads the .map, which only `sym` writes -- so it depends on sym, not
 # on $(ROM).

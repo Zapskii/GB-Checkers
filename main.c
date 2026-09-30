@@ -860,7 +860,14 @@ void main(void)
      * VRAM writes do; it is what the sibling ships.  Four frames first: a PAL
      * SNES needs that delay at startup or no border shows.  sgb_check() is
      * false on a DMG, so an ordinary Game Boy boots exactly as it did before --
-     * all of this, including the tile reload, is behind that gate. */
+     * all of this, including the tile reload, is behind that gate.
+     *
+     * The three blobs below are in ROM bank 1, not bank 0: border_data.c is
+     * compiled with `#pragma bank 1`, so they link at 0x4000+ and this file
+     * hands set_sgb_border() ordinary 16-bit pointers.  That is safe with no
+     * bank switching of any kind, because the cart is ROM-only (header 0x0147
+     * = 0x00), so bank 1 is permanently mapped at 0x4000.  P15; p13 in the
+     * probe asserts the addresses. */
     {
         uint8_t i;
         for (i = 0; i != 4; i++) vsync();
