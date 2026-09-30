@@ -13,8 +13,17 @@
  * and the side that has to lose is the one that has just been handed the turn,
  * never the one that just moved.  START (or B) starts a new game from there.
  *
- * Controls: START = new game, d-pad = move the cursor, A = select/play,
- * B = deselect (and, in ST_OVER, also new game).
+ * P10 puts an opponent in the white chair.  SELECT on the title screen picks
+ * 2 PLAYERS or 1 PLAYER; in 1 PLAYER the human is black (black moves first, so
+ * the human always opens) and every white turn is the machine's.  The machine
+ * does not get a turn loop of its own: it draws THINKING, calls search_best()
+ * from sim.h, and hands the answer to the SAME play() the human's moves go
+ * through - so the chain rule, promotion-stops-the-chain and the end-of-game
+ * question have one implementation, not two.
+ *
+ * Controls: START = new game, SELECT = 2/1 PLAYER (title screen only),
+ * d-pad = move the cursor, A = select/play, B = deselect (and, in ST_OVER,
+ * also new game).
  */
 #include <gb/gb.h>
 #include <stdint.h>
@@ -30,10 +39,12 @@
 #define BOARD_TH  16u
 
 #define TITLE_ROW  6u
+#define MODE_ROW   8u    /* the title's 2/1 PLAYER line, between the two below */
 #define STATUS_ROW 10u   /* the one centred line of text inside the board
-                          * region: the title's prompt, and the result in
-                          * ST_OVER - the two states are exclusive */
-#define TEXT_COL   4u    /* both strings are 11 tiles wide: (20 - 11) / 2 */
+                          * region: the title's prompt, the machine's THINKING,
+                          * and the result in ST_OVER - the three are mutually
+                          * exclusive states of the one line */
+#define TEXT_COL   4u    /* the longest strings are 11 tiles wide: (20-11)/2 */
 
 /* The HUD strip.  PLAN.md's data contract gives it tiles x 16..19, y 0..15 - a
  * 32 px column down the right-hand edge, outside the board's own 16x16.  The
@@ -91,6 +102,30 @@ static uint8_t chain_sq;
  * that lives outside the board's 16x16 region. */
 static uint8_t mapbuf[BOARD_TW * BOARD_TH];
 static uint8_t hudbuf[HUD_TW * HUD_TH];
+
+/* ---------------------------------------------------------------- the AI
+ * Two players, or the machine playing white.  One global, flipped by SELECT on
+ * the title screen - the only place it can change, so a game never swaps
+ * opponent halfway through.  It is part of what the screen is built from (the
+ * title says which mode you are about to start), so screen_stale() watches it
+ * like everything else. */
+static uint8_t mode_1p;
+
+/* How deep the machine searches, in plies.  PROVISIONAL: P11 measures the
+ * worst-case think in emulator frames and replaces this number with the largest
+ * one that fits the budget.  Measured by hand on this build at the start
+ * position - white's reply to black's first move, one emulator frame being
+ * 16.7 ms - the think costs ~55 frames at depth 1, ~300 at depth 2 and ~905 at
+ * depth 3.  2 is the deepest that is plausibly inside P11's 600-frame budget;
+ * P11 owns the number.  The search is a blocking call, so an over-optimistic
+ * value here is a frozen screen, not a merely slow one. */
+#define AI_DEPTH 2u
+
+/* P9's search arena, one frame per ply.  FILE SCOPE, and that is load-bearing:
+ * AI_MAX_PLY * sizeof(AiFrame) is about a kilobyte, and on the DMG's stack that
+ * is not "large", it is a crash.  There is one machine and one position at a
+ * time, so one arena is the whole need. */
+static AiFrame arena[AI_MAX_PLY];
 
 /* ------------------------------------------------------------------ rules
  * Nothing below touches hardware: it is board -> move list -> selection, which
@@ -247,9 +282,19 @@ static void refresh_moves(void)
     compute_legal();
 }
 
-/* Plays the move that lands on `sq`, if the piece picked up has one.  The move
- * comes straight out of the list the screen is showing, so what gets applied is
- * exactly what was highlighted.
+/* Plays the move that goes from `from` to `to`.  The move comes straight out of
+ * the list the screen is showing, so what gets applied is exactly what was
+ * highlighted - and for the machine, exactly what the search chose.
+ *
+ * Matched on BOTH squares, not on the destination alone.  Destination-only was
+ * fine while the only caller was a human with one piece picked up (every entry
+ * in the list is that piece's, so a destination names one move), but the
+ * machine calls this with a move out of the WHOLE side's list, where two legal
+ * moves can share a destination - a man 9->13 and a king 18->13 in the same
+ * position.  First-match on the destination would then silently apply a
+ * different piece's move than the one the search picked, and the board would
+ * look perfectly legal while being wrong.  (from, to) is unique: the jumped
+ * square is the midpoint of the two, so it is determined by them.
  *
  * Then the turn does one of two things, and telling them apart is what this
  * phase is about:
@@ -270,22 +315,22 @@ static void refresh_moves(void)
  * this repo once; the wrong form is:
  *     if (m.capture != NO_SQ && must_continue(&board, m.to))
  *
- * A is a no-op when nothing lands on `sq` - picking a piece up and pressing A
- * again without walking anywhere - which is why this searches the list rather
- * than indexing into it.  It also never runs when nothing is picked up: the
- * caller only gets here from ST_TARGET.
+ * A no-op when (from, to) is not a move in the list - picking a piece up and
+ * pressing A again without walking anywhere - which is why this searches the
+ * list rather than indexing into it.  From the human it never runs with nothing
+ * picked up: that caller only gets here from ST_TARGET.
  *
  * board = apply_move(...) and not a hand-rolled copy of the mask arithmetic:
  * tests/test_sim.c covers apply_move on the host, and a second implementation
  * living here would be covered by nothing at all. */
-static void play(uint8_t sq)
+static void play(uint8_t from, uint8_t to)
 {
     uint8_t i;
     for (i = 0; i < n_moves; i++) {
         Move m = moves[i];
         Board before;
 
-        if (m.to != sq) continue;
+        if (m.from != from || m.to != to) continue;
 
         before = board;
         board = apply_move(board, m);
@@ -375,7 +420,7 @@ static void handle_input(void)
                 seat_cursor();                /* and stand on a destination */
             }
         } else {
-            play(cursor);                     /* A on a destination: move it */
+            play(sel, cursor);                /* A on a destination: move it */
         }
     }
     /* B drops a piece you picked up.  Mid-chain there is nothing to drop: the
@@ -427,7 +472,7 @@ static void text_v(uint8_t col, uint8_t row, const char *s)
  * tilemap checks are what pin it - they read the screen and the statics
  * together. */
 static Board   drawn_board;
-static uint8_t drawn_side, drawn_state, drawn_sel, drawn_chain;
+static uint8_t drawn_side, drawn_state, drawn_sel, drawn_chain, drawn_mode;
 static uint8_t drawn_once;      /* 0 until the first build has happened */
 
 static uint8_t screen_stale(void)
@@ -444,6 +489,10 @@ static uint8_t screen_stale(void)
     if (drawn_board.kings != board.kings) return 1;
     if (drawn_side != side || drawn_state != state) return 1;
     if (drawn_sel != sel || drawn_chain != chain_sq) return 1;
+    /* mode_1p too: the title screen spells it, and SELECT can flip it while
+     * nothing else above has moved, which is exactly the frame this gate would
+     * otherwise skip. */
+    if (drawn_mode != mode_1p) return 1;
     return 0;
 }
 
@@ -454,6 +503,7 @@ static void screen_drawn(void)
     drawn_state = state;
     drawn_sel   = sel;
     drawn_chain = chain_sq;
+    drawn_mode  = mode_1p;
     drawn_once  = 1;
 }
 
@@ -462,6 +512,10 @@ static void build_title(void)
     uint16_t i;
     for (i = 0; i < BOARD_TW * BOARD_TH; i++) mapbuf[i] = T_BLANK;
     text(TEXT_COL, TITLE_ROW, "GB DRAUGHTS");
+    /* "2 PLAYERS" is nine tiles and "1 PLAYER" eight, so one column cannot
+     * centre both; TEXT_COL centres the shorter and leaves the longer half a
+     * tile left of centre, which is what a font this size can do. */
+    text(TEXT_COL, MODE_ROW, mode_1p ? "1 PLAYER" : "2 PLAYERS");
     text(TEXT_COL, STATUS_ROW, "PRESS START");
 }
 
@@ -544,6 +598,20 @@ static void draw_highlights(void)
     }
 }
 
+/* The whole game screen, in one place: board, then the highlights under the
+ * pieces, then the pieces, then the result on top if the game is over.  Both
+ * the ordinary frame and the machine's THINKING frame come through here, so the
+ * two can never draw a different screen from the same state. */
+static void build_game(void)
+{
+    build_board();
+    if (sel != NO_SQ) draw_highlights();
+    draw_pieces();
+    /* Over the top of the drawn pieces: the result is the one thing on the
+     * board in ST_OVER, and the pieces are still worth seeing underneath it. */
+    if (state == ST_OVER) build_status();
+}
+
 /* OAM coordinates are not screen coordinates: the DMG draws an 8x8 sprite
  * with its TOP-LEFT at (OAM_x - 8, OAM_y - 16), and move_sprite() writes OAM
  * raw.  So both offsets go in here, or the ring lands one square up-left of
@@ -585,6 +653,82 @@ static void new_game(void)
     refresh_moves();
 }
 
+/* Whose turn this is, and whether a person or the machine plays it.
+ *
+ * Black moves first, so in 1 PLAYER the human is black and "white to move" IS
+ * "the machine's turn" - there is no second flag to keep in step with `side`.
+ * ST_SELECT and ST_TARGET are the live states; ST_OVER and ST_TITLE are not
+ * turns at all, and asking this there would let the machine play on at a
+ * finished game.
+ *
+ * ST_TARGET counts because the machine's move may be the first hop of a chain:
+ * play() leaves the piece up exactly as it does for a human, and the next hop
+ * is the machine's too. */
+static uint8_t machine_to_move(void)
+{
+    return (uint8_t)(mode_1p && side == SIDE_WHITE &&
+                     (state == ST_SELECT || state == ST_TARGET));
+}
+
+/* The machine's turn: say so, think, and play - through play(), the same path
+ * a human's move takes.
+ *
+ * THINKING is BLITTED before the search, not merely built.  The search is a
+ * blocking call, so without this the player would sit looking at the previous
+ * frame for as long as it takes, with nothing on screen to say the game is
+ * alive rather than hung.  The status row is where it goes - the same line the
+ * result banner uses, and the game over and the machine thinking never
+ * overlap.  The blit needs its own wait_vbl_done(): VRAM is only writable in
+ * VBlank, and this write happens in the middle of a frame, not at the end of
+ * one like the main loop's.
+ *
+ * The move itself is one hop.  A chain's next hop arrives on the next frame,
+ * through this same function, because play() has left chain_sq set - there is
+ * no "AI chain" here to fork the promotion rule. */
+static void ai_turn(void)
+{
+    Move m;
+
+    /* The move list is rebuilt HERE rather than taken from the loop's own call
+     * at the top of this iteration.  On the frame the human's move handed the
+     * turn over, that list is still black's - the loop has to fill it before
+     * handle_input() for the selection's sake, which is exactly why it cannot
+     * be reused after - and play() would look for the machine's move in it and
+     * find nothing, leaving the machine to think the whole thing over again on
+     * the next frame. */
+    compute_legal();
+
+    build_game();
+    text(TEXT_COL, STATUS_ROW, "THINKING");
+    build_hud();
+    wait_vbl_done();
+    set_bkg_tiles(0, 0, BOARD_TW, BOARD_TH, mapbuf);
+    set_bkg_tiles(HUD_X, 0, HUD_TW, HUD_TH, hudbuf);
+    screen_drawn();
+
+    /* search_best() writes *out only when it has a move to report - a loss and
+     * a depth of 0 leave it alone (P9's contract, pinned host-side by
+     * test_search_depth_zero_leaves_out_alone).  So the move starts as "no
+     * move" and the returned score is checked as well: both say the same thing
+     * here, and between them the machine cannot play an indeterminate square -
+     * which is what an uninitialised out would leave it doing. */
+    m.from = m.to = m.capture = NO_SQ;
+
+    if (chain_sq != NO_SQ) {
+        /* Mid-chain the rule is already decided: chain_sq is set, and the move
+         * list is exactly the piece on it.  Searching HERE would be wrong twice
+         * over - gen_moves() would offer a different piece's move, which
+         * play() then would not find, and the mandatory continuation would be
+         * gone.  A hop off the list the screen is already showing is what the
+         * human's path does too. */
+        if (n_moves) m = moves[0];
+    } else if (search_best(board, SIDE_WHITE, AI_DEPTH, arena, &m) <= -AI_WIN_SCORE) {
+        m.from = NO_SQ;                 /* no move to report: nothing to play */
+    }
+
+    if (m.from != NO_SQ) play(m.from, m.to);
+}
+
 /* ------------------------------------------------------------------ main */
 void main(void)
 {
@@ -617,23 +761,43 @@ void main(void)
         frame++;
 
         if (state == ST_TITLE) {
+            /* SELECT is the mode toggle, and the title is the only place it
+             * exists: a game never swaps opponent halfway through. */
+            if (pressed & J_SELECT) mode_1p = (uint8_t)(mode_1p ^ 1u);
             if (pressed & J_START) {
                 new_game();
                 state = ST_SELECT;
             }
         } else {
             /* This frame's legal moves, from this frame's board and this
-             * frame's side, before input or the screen reads any of it. */
+             * frame's side, before input or the screen reads any of it.  The
+             * machine's turn needs this list as much as the human's does, so it
+             * is filled either way. */
             compute_legal();
-            /* A parked cursor has nowhere to be: the first frame of a game,
-             * and the frame a turn passes on.  Seat it on the first square the
-             * side to move can actually use, so the player never has to press
-             * a direction just to find a piece.  It is set after
-             * compute_legal() because that is what fills the move list. */
-            if (state == ST_SELECT && cursor == NO_SQ && n_moves)
-                cursor = moves[0].from;
-            handle_input();
+            /* Everything below is the HUMAN's half of the frame, and it is
+             * skipped whole on the machine's turn: no cursor seating, no
+             * walking, no A.  The cursor stays parked at NO_SQ, which is where
+             * play() leaves it at the end of a turn, so the ring is off the
+             * board while the machine plays - the machine never drives the
+             * cursor, and a human pressing A must not play the machine's
+             * piece.  START and B go with it: on the machine's turn they are
+             * dropped, which lasts as long as one blocking think (P11). */
+            if (!machine_to_move()) {
+                /* A parked cursor has nowhere to be: the first frame of a game,
+                 * and the frame a turn passes on.  Seat it on the first square
+                 * the side to move can actually use, so the player never has to
+                 * press a direction just to find a piece.  It is set after
+                 * compute_legal() because that is what fills the move list. */
+                if (state == ST_SELECT && cursor == NO_SQ && n_moves)
+                    cursor = moves[0].from;
+                handle_input();
+            }
         }
+
+        /* The machine's turn - which the human's move may have just handed it,
+         * so this is after handle_input(), not before: the reply to a move
+         * belongs to the same iteration the move was made in. */
+        if (machine_to_move()) ai_turn();
 
         /* Build the frame first, blit it second: the VRAM writes then land in
          * the VBlank window instead of being dropped by the PPU.  Skipped
@@ -652,17 +816,8 @@ void main(void)
              * redrew every frame never had to say this out loud - the next
              * frame's compute_legal() was the repair, one frame late. */
             compute_legal();
-            if (state == ST_TITLE) {
-                build_title();
-            } else {
-                build_board();
-                if (sel != NO_SQ) draw_highlights();
-                draw_pieces();
-                /* Over the top of the drawn pieces: the result is the one thing
-                 * on the board in ST_OVER, and the pieces are still worth seeing
-                 * underneath it. */
-                if (state == ST_OVER) build_status();
-            }
+            if (state == ST_TITLE) build_title();
+            else                   build_game();
             build_hud();
         }
         /* The rings are four OAM bytes and are written every frame whatever

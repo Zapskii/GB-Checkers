@@ -5,22 +5,39 @@ with no game engine. Same lineage as GB-Protector: procedural art via a
 Python script, and hardware-independent logic in a `sim.h` that's tested
 on the host before anything touches GBDK.
 
-**Current stage: Milestone 1 complete.** A full two-player game, pass and play:
-title screen, board and cursor, mandatory capture, multi-jump chains, promotion,
-win detection and restart. `make` builds the ROM, `make test` runs the rules
-engine's unit tests on the host, and `make probe` drives the ROM in a headless
-emulator and asserts on what it did.
-
-There is no AI opponent yet - both players share the Game Boy (Milestone 2).
+**Current stage: Milestone 2 in progress - there is a 1-player game.** Milestone 1
+is complete: a full two-player pass-and-play game with title screen, board and
+cursor, mandatory capture, multi-jump chains, promotion, win detection and
+restart. Milestone 2 adds an opponent: pick **1 PLAYER** on the title screen and
+the machine plays white, the human black. `make` builds the ROM, `make test` runs
+the rules engine's unit tests on the host, and `make probe` drives the ROM in a
+headless emulator and asserts on what it did.
 
 ## Controls
 
 | Button | What it does |
 |--------|--------------|
+| SELECT | on the title screen, switch between **2 PLAYERS** and **1 PLAYER** |
 | START  | new game - from the title screen, and from a finished game |
 | d-pad  | move the cursor. Before a piece is picked up it walks square to square along the diagonals, resting only on squares you can actually use. Once a piece is up it cycles that piece's landing squares, one per press (hold to repeat) |
 | A      | pick up the piece under the cursor; press again to play the move. Picking up *seats* the cursor on a landing square, so the second press always has somewhere to go |
 | B      | put a picked-up piece back down; on a finished game, new game |
+
+## 1 player
+
+The machine is always white, so the human always opens - black moves first. Its
+turn is a blocking one: the status row says **THINKING**, the screen is blitted
+with that line *before* the search starts, and the loop is frozen for as long as
+the search takes. On the current build that is a few seconds at the start
+position; P11 measures it properly and pins the worst case. Because the think is
+blocking, START and B pressed during it are dropped - the game restarts a moment
+later instead of not at all.
+
+The machine chooses from the same legal move list a human does, at the same
+depth every turn, and its move is applied through the same `play()` the human's
+goes through - so mandatory capture, the chain rule and
+promotion-stops-the-chain apply to it by construction rather than by a second
+implementation. It never drives the cursor or animates.
 
 The d-pad is rotated 45 degrees: **UP** and **RIGHT** both go up the screen,
 **DOWN** and **LEFT** both go down, and nothing moves straight sideways. A
@@ -75,8 +92,11 @@ piece blocked. The status row says who won and START (or B) starts a new game.
 
 ## Not implemented yet (by design, see the plan)
 
-- `evaluate()` / `search_best()` - the AI opponent. That's Milestone 2;
-  Milestone 1 is 2-player pass-and-play only.
+- Difficulty levels, or a machine that plays black. There is one depth, chosen
+  by measuring the worst-case think (P11), and the machine is white only.
+- Thinking that can be interrupted: the search is a blocking call, so the loop
+  genuinely stops while the machine replies. Time-slicing it is the named
+  upgrade path if the measurement ever demands one.
 - International/10x10 draughts or flying kings (different capture rules
   entirely - would touch move generation throughout, not attempted here).
 - Draw detection (40-move/repetition rules). Because there is none, a game
@@ -105,12 +125,12 @@ list the statics the probe reads), so if you want the release binary, run
 
 | File               | What it is                                                  |
 |--------------------|--------------------------------------------------------------|
-| `main.c`           | Everything that touches hardware: state machine, input, rendering |
+| `main.c`           | Everything that touches hardware: state machine, input, rendering, and the machine's turn |
 | `boardgen.py`      | Generates the 32-square diagonal neighbor table + self-checks |
 | `board_geom.h`     | Generated, committed - a plain `make test` needs no Python   |
 | `mkgfx.py`         | Generates `gfx.h` (tile art, ids, the cursor sprite)          |
 | `gfx.h`            | Generated, committed. Included by `main.c` only               |
-| `sim.h`            | Pure rules engine (move gen, capture, chains, promotion); no GBDK |
+| `sim.h`            | Pure rules engine (move gen, capture, chains, promotion) and the search; no GBDK |
 | `tests/test_sim.c` | Geometry checks, hand-built positions, and random self-play fuzzing |
 | `tools/probe.py`   | Headless emulator checks: the tilemap, and `main.c`'s own statics |
 
@@ -120,11 +140,12 @@ list the statics the probe reads), so if you want the release binary, run
 
 | Bank    | Size  | Used       | Free       |
 |---------|-------|------------|------------|
-| ROM_0   | 16384 | 6284 (38%) | 10100 (62%) |
-| WRAM_LO | 4096  | 504 (12%)  | 3592 (88%)  |
+| ROM_0   | 16384 | 9411 (57%) | 6973 (43%) |
+| WRAM_LO | 4096  | 1556 (38%) | 2540 (62%) |
 
-Plenty for Milestone 2: the AI's search is stack and a few move lists, not
-data.
+The AI is most of the WRAM: its search arena is `AI_MAX_PLY` `AiFrame`s, about a
+kilobyte, held at file scope in `main.c` rather than on the stack - a kilobyte of
+stack on a DMG is not "large", it is a crash.
 
 ## How the board is represented
 

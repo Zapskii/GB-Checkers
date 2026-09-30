@@ -18,6 +18,7 @@ EXIT CODES -- the driver's power gate depends on this split:
 
 This is a DEV TOOL. Nothing in the build depends on it.
 """
+import os
 import re
 import sys
 
@@ -1409,6 +1410,358 @@ def p8_one_step_per_tap(g):
           "and a held D still repeats past it (%d)" % g.var("cursor"))
 
 
+# --------------------------------------------------------------- P10 -------
+# main.c's mode global and the two mode lines the title offers.  `mode_1p` is
+# the symbol this phase adds, so its absence from the map is what makes this
+# check answer 1 on P9's ROM instead of the harness error 2.
+MODE_2P, MODE_1P = 0, 1
+
+DIR_NW, DIR_NE, DIR_SW, DIR_SE = 0, 1, 2, 3   # board_geom.h's direction order
+
+# board_geom.h's BLACK_KING_ROW_MIN / WHITE_KING_ROW_MAX, written as they are
+# used here (a black man promotes at >= 28, a white one at <= 3).
+BLACK_KING_MIN, WHITE_KING_MAX = 28, 3
+
+
+def neigh_table():
+    """NEIGH, parsed out of the generated board_geom.h.
+
+    A second copy of the diagonal table in this file would drift the moment
+    `make geom` regenerated the real one - and these checks exist precisely to
+    compute for themselves what sim.h would compute, rather than asking the ROM
+    to vouch for its own answers."""
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                        "..", "board_geom.h")
+    rows = []
+    for line in open(path):
+        m = re.match(r"\s*\{\s*(.*?)\s*\},\s*/\*\s*\d+\s*\*/", line)
+        if m:
+            rows.append(tuple(NO_SQ if v.strip() == "NO_SQ" else int(v)
+                              for v in m.group(1).split(",")))
+    if len(rows) != 32:
+        raise ValueError("board_geom.h: parsed %d NEIGH rows, wanted 32"
+                         % len(rows))
+    return rows
+
+
+NEIGH = neigh_table()
+
+
+def piece_dirs(kings, sq, side):
+    """sim.h's dir_mask() - which of the four diagonals this piece may use."""
+    if kings & (1 << sq):
+        return (DIR_NW, DIR_NE, DIR_SW, DIR_SE)
+    return (DIR_SW, DIR_SE) if side == SIDE_BLACK else (DIR_NW, DIR_NE)
+
+
+def gen_captures_from(black, white, kings, side, sq):
+    """sim.h's gen_captures_from(): this one piece's jumps, in the engine's
+    order.  No mandatory-capture rule here - that is the caller's question."""
+    own = black if side == SIDE_BLACK else white
+    opp = white if side == SIDE_BLACK else black
+    out = []
+    for d in piece_dirs(kings, sq, side):
+        mid = NEIGH[sq][d]
+        if mid == NO_SQ or not opp & (1 << mid):
+            continue
+        land = NEIGH[mid][d]
+        if land == NO_SQ or (own | opp) & (1 << land):
+            continue
+        out.append({"from": sq, "to": land, "capture": mid})
+    return out
+
+
+def gen_moves(black, white, kings, side):
+    """sim.h's gen_moves(): the whole side's legal moves, mandatory capture
+    already folded in - captures if any piece has one, else every quiet move.
+    This is the list the machine has to choose from, computed here so the check
+    does not have to take the ROM's word for what is legal."""
+    own = black if side == SIDE_BLACK else white
+    opp = white if side == SIDE_BLACK else black
+    quiet, cap = [], []
+    for sq in range(32):
+        if not own & (1 << sq):
+            continue
+        jumps = gen_captures_from(black, white, kings, side, sq)
+        if jumps:
+            cap.extend(jumps)
+            continue
+        for d in piece_dirs(kings, sq, side):
+            mid = NEIGH[sq][d]
+            if mid == NO_SQ or (own | opp) & (1 << mid):
+                continue
+            quiet.append({"from": sq, "to": mid, "capture": NO_SQ})
+    return cap or quiet
+
+
+def apply_move(black, white, kings, mv):
+    """sim.h's apply_move(): move, take, and promote.
+
+    The promotion half is not optional - a "is this the board after that move"
+    comparison that skipped it would call a crowning move wrong, and crowning
+    is one of the things this check is here to see."""
+    f, t = 1 << mv["from"], 1 << mv["to"]
+    black_side = bool(black & f)
+    was_king = bool(kings & f)
+    if black_side:
+        black = (black & ~f) | t
+    else:
+        white = (white & ~f) | t
+    if was_king:
+        kings = (kings & ~f) | t
+    if mv["capture"] != NO_SQ:
+        c = 1 << mv["capture"]
+        black, white, kings = black & ~c, white & ~c, kings & ~c
+    if not was_king:
+        if black_side and mv["to"] >= BLACK_KING_MIN:
+            kings |= t
+        if not black_side and mv["to"] <= WHITE_KING_MAX:
+            kings |= t
+    return black, white, kings
+
+
+def board_cells(black, white, kings):
+    """{(row, col): kind} that the screen should be showing, from the masks.
+    Kind 0..3 is main.c's T_PIECE order: {black, white} x {man, king}."""
+    out = {}
+    for sq in range(32):
+        m = 1 << sq
+        who = 0 if black & m else 1 if white & m else None
+        if who is None:
+            continue
+        out[(sq_row(sq), sq_col(sq))] = who + (2 if kings & m else 0)
+    return out
+
+
+def maskstr(masks):
+    return " ".join("0x%08X" % v for v in masks)
+
+
+def set_byte(g, name, val):
+    """One main.c static, written as one byte.
+
+    PyBoyMemoryView takes an INT for a single address and a bytes-like only for
+    a slice, so `mem[addr] = bytes([v])` is a TypeError, not a write."""
+    a = g.addr[name]
+    g.p.memory[a:a + 1] = bytes([val])
+
+
+def force_position(g, black, white, kings, side):
+    """Put a whole position into main.c's statics, at a turn start.
+
+    A midgame position with the MACHINE to move cannot be played into and cannot
+    be caught on the way past: the reply happens inside the same loop iteration
+    as the move before it, so there is no frame between them to look at.  So the
+    board goes straight into WRAM - the trick p4/p5/p6 already use - widened
+    here to every static a turn boundary parks, so the position is a real turn
+    start and not half of one."""
+    a = g.addr["board"]
+    g.p.memory[a:a + 12] = board_bytes(black, white, kings)
+    for name, val in (("side", side), ("sel", NO_SQ), ("cursor", NO_SQ),
+                      ("chain_sq", NO_SQ), ("state", ST_SELECT)):
+        set_byte(g, name, val)
+    g.run(6)
+
+
+def await_reply(g, limit=900, step=10):
+    """Wait out the machine's turn, and let the screen catch up behind it.
+
+    The whole think is a blocking call in the middle of one loop iteration, so
+    the reply can only be waited for, never caught between frames.  Then the
+    settle: `side` flips inside play(), several frames before that iteration's
+    blit, and the tilemap the probe reads is whatever was blitted LAST - so
+    without it a screen assertion reads the frame before the reply.  `limit`
+    only has to be longer than P11's budget for the think."""
+    for _ in range(limit // step):
+        g.run(step)
+        if g.var("side") == SIDE_BLACK:
+            g.run(20)
+            return True
+    return False
+
+
+def p10_ai_opponent(g):
+    """1 PLAYER: the machine plays white, through the same play() the human's
+    moves go through - and the 2-player game is what it always was."""
+    print("P10 the machine takes white")
+    # Boot the way p1 does: the Game constructor ticks nothing, so without this
+    # every read below is of an emulator that has not run main() yet.
+    g.run(150)
+    if not g.need("mode_1p", "arena", "side", "board", "state", "cursor",
+                  "sel", "n_moves", "moves", "chain_sq"):
+        return
+
+    # --- the title's mode line, and SELECT flipping it --------------------
+    # The title screen is a function of nothing but mode_1p in this respect, and
+    # `board`, `side`, `state`, `sel` and `chain_sq` are all unchanged by a
+    # SELECT press - so a screen_stale() that does not watch mode_1p leaves the
+    # old line sitting there and this is what catches it.
+    check(g.find_text("2 PLAYERS") != [] and g.find_text("1 PLAYER") == [],
+          "the title offers 2 PLAYERS (%r / %r)"
+          % (g.find_text("2 PLAYERS"), g.find_text("1 PLAYER")))
+    check(g.var("mode_1p") == MODE_2P,
+          "and 2 players is where the game starts (%d)" % g.var("mode_1p"))
+    tap(g, "T")
+    check(g.find_text("1 PLAYER") != [] and g.find_text("2 PLAYERS") == [],
+          "SELECT flips the line to 1 PLAYER, and the screen redrew for it "
+          "(%r / %r)" % (g.find_text("1 PLAYER"), g.find_text("2 PLAYERS")))
+    check(g.var("mode_1p") == MODE_1P,
+          "mode_1p followed it (%d)" % g.var("mode_1p"))
+    tap(g, "T")
+    check(g.find_text("2 PLAYERS") != [] and g.var("mode_1p") == MODE_2P,
+          "and SELECT flips it back (%r, mode %d)"
+          % (g.find_text("2 PLAYERS"), g.var("mode_1p")))
+    tap(g, "T")
+    check(g.var("mode_1p") == MODE_1P and g.find_text("1 PLAYER") != [],
+          "1 PLAYER, for the game about to start (%d, %r)"
+          % (g.var("mode_1p"), g.find_text("1 PLAYER")))
+
+    # --- 1 player: the human opens as black -------------------------------
+    g.run(20, "S")              # held, not tapped - see Game.start()
+    g.run(30)
+    check(g.var("state") == ST_SELECT and g.var("side") == SIDE_BLACK,
+          "the game starts with the human to move: black, as always (%d, %d)"
+          % (g.var("state"), g.var("side")))
+    check(hud_word(g) == "BLACK", "the HUD says BLACK (%r)" % hud_word(g))
+    check(g.cursor_box() is not None,
+          "and the human's cursor is on the board, not parked (%r)"
+          % (g.cursor_box(),))
+
+    # The p4 flow, unchanged: pick the man on 9 up and play it to 13.  Nothing
+    # here is new - p4 owns it - and that is the point: the human's half of a 1P
+    # turn has to be exactly the 2P half.
+    set_cursor(g, 9)
+    tap(g, "A")
+    check(g.var("sel") == 9 and g.var("state") == ST_TARGET,
+          "A picks the man on 9 up (%d, state %d)"
+          % (g.var("sel"), g.var("state")))
+    check(cycle_to(g, 13), "and cycles the cursor to 13 (%d)" % g.var("cursor"))
+    tap(g, "A")
+
+    # --- and white replies -------------------------------------------------
+    # The reply comes inside the same loop iteration the human's move was made
+    # in, so the board it replied FROM is never on screen and never readable
+    # between frames.  It is reproduced instead: the start position with the
+    # human's 9 -> 13 played, which is exactly what p4 pins that tap to be.
+    pre = apply_move(BLACK_START, WHITE_START, 0,
+                     {"from": 9, "to": 13, "capture": NO_SQ})
+    check(await_reply(g),
+          "the machine replies: black is to move again (%d, state %d)"
+          % (g.var("side"), g.var("state")))
+    post = board_masks(g)
+    allowed = gen_moves(pre[0], pre[1], pre[2], SIDE_WHITE)
+    matched = [m for m in allowed if apply_move(*pre, m) == post]
+    # Exactly one: no two legal moves produce the same board, so a single match
+    # is the whole statement "the machine played a legal move".  White has no
+    # capture here (its men are on 20-31, black's only forward piece is the man
+    # on 13, and no white man is adjacent to it), so the reply is one quiet hop
+    # and this comparison against a single move is complete.
+    check(len(matched) == 1,
+          "the machine's reply is ONE of white's legal moves on the pre-reply "
+          "board - %s -> %s (legal set %r)"
+          % (maskstr(pre), maskstr(post), allowed))
+    check(bin(post[0]).count("1") == 12 and bin(post[1]).count("1") == 12,
+          "and it was quiet - both sides still have twelve men (black %s, "
+          "white %s)" % (bin(post[0]), bin(post[1])))
+    check(piece_kinds(g) == board_cells(*post),
+          "the machine's move reached the screen - what is drawn is the "
+          "post-reply board, cell for cell")
+
+    # --- the machine obeys mandatory capture ------------------------------
+    print("P10 the machine takes a forced capture")
+    # White men on 18 and 22, black men on 14 and 17.  Each white man can jump
+    # one black man (18 -NW-> 9 over 14, 22 -NW-> 13 over 17), and neither has a
+    # quiet move once a capture is on - so mandatory capture leaves the machine
+    # exactly two moves to choose between, and both of them take a piece.  A
+    # machine that quietly played a forward move here would be caught by the
+    # "is the reply in the legal set" comparison, because the quiet moves are
+    # not in that set.
+    blk, wht = (1 << 14) | (1 << 17), (1 << 18) | (1 << 22)
+    set_byte(g, "mode_1p", MODE_1P)
+    force_position(g, blk, wht, 0, SIDE_WHITE)
+    pre = (blk, wht, 0)
+    allowed = gen_moves(blk, wht, 0, SIDE_WHITE)
+    check(len(allowed) == 2 and all(m["capture"] != NO_SQ for m in allowed),
+          "white is offered two captures and nothing else (%r)" % (allowed,))
+    check(await_reply(g),
+          "the machine takes one: black is to move again (%d)" % g.var("side"))
+    post = board_masks(g)
+    matched = [m for m in allowed if apply_move(*pre, m) == post]
+    check(len(matched) == 1,
+          "and what it played is one of those two captures - %s -> %s "
+          "(captures %r)" % (maskstr(pre), maskstr(post), allowed))
+    check(bin(post[0]).count("1") == 1,
+          "black really is a man down (black %s)" % bin(post[0]))
+    check(piece_kinds(g) == board_cells(*post),
+          "and the taken man left the screen too")
+
+    # --- the move is matched by (from, to), not by destination ------------
+    print("P10 the machine's move is not another piece's move")
+    # White king on 4 and white man on 5 can BOTH reach square 0, and 0 is on
+    # white's promotion row, so the man's move is worth a whole king more than
+    # the king's and the search takes it - while the king's move to that same
+    # square comes FIRST in the move list (square 4 is scanned before 5).  A
+    # play() that matched on the destination alone would find the king's move
+    # first and play it: same square, still legal, wrong piece, and no crown.
+    #
+    # A black man on square 1 is what makes it decidable: it blocks the man's
+    # other forward move (5 -NE-> 1), so 5 -> 0 is its only move and the
+    # search's choice is forced rather than a tie broken by mobility.  Verified
+    # against a from-scratch minimax of sim.h's own evaluation: 5 -> 0 is the
+    # unique best at depths 1, 2 and 3.
+    blk, wht, kng = (1 << 1) | (1 << 20) | (1 << 24), (1 << 4) | (1 << 5), 1 << 4
+    force_position(g, blk, wht, kng, SIDE_WHITE)
+    pre = (blk, wht, kng)
+    allowed = gen_moves(blk, wht, kng, SIDE_WHITE)
+    pairs = [(m["from"], m["to"]) for m in allowed]
+    check(pairs == [(4, 0), (4, 8), (5, 0)],
+          "white has three moves and two of them reach square 0, the king's "
+          "first (%r)" % (pairs,))
+    check(await_reply(g), "the machine replies (%d)" % g.var("side"))
+    post = board_masks(g)
+    exp = apply_move(blk, wht, kng, {"from": 5, "to": 0, "capture": NO_SQ})
+    check(post == exp,
+          "it played the MAN's move to 0 - crowned, with the king on 4 never "
+          "moving - not the king's move to the same square (got %s, wanted %s)"
+          % (maskstr(post), maskstr(exp)))
+    check(bool(post[1] & (1 << 4)) and bool(post[2] & (1 << 0)),
+          "the man crowned and the old king is still on 4 (white 0x%08X, "
+          "kings 0x%08X)" % (post[1], post[2]))
+    check(piece_kinds(g) == board_cells(*post),
+          "and the screen shows two white kings and the three black men")
+
+    # --- and the 2-player game is exactly what it was ---------------------
+    print("P10 the 2-player game is untouched")
+    set_byte(g, "mode_1p", MODE_2P)
+    set_byte(g, "state", ST_TITLE)
+    g.run(30)
+    check(g.find_text("2 PLAYERS") != [] and g.find_text("1 PLAYER") == [],
+          "back at the title with 2 PLAYERS (%r)" % (g.find_text("2 PLAYERS"),))
+    g.run(20, "S")
+    g.run(30)
+    check(g.var("side") == SIDE_BLACK and g.var("state") == ST_SELECT,
+          "a 2-player game starts with black to move (%d, %d)"
+          % (g.var("side"), g.var("state")))
+    set_cursor(g, 9)
+    tap(g, "A")
+    check(cycle_to(g, 13), "the cursor cycles to 13 (%d)" % g.var("cursor"))
+    tap(g, "A")
+    check(g.var("side") == SIDE_WHITE,
+          "black's move hands the turn to white, exactly as before (%d)"
+          % g.var("side"))
+    g.run(150)
+    check(g.var("side") == SIDE_WHITE and g.var("state") == ST_SELECT,
+          "and 150 frames later white is still waiting for a person - no "
+          "machine took the turn (%d, %d)"
+          % (g.var("side"), g.var("state")))
+    human = apply_move(BLACK_START, WHITE_START, 0,
+                       {"from": 9, "to": 13, "capture": NO_SQ})
+    check(board_masks(g) == human,
+          "the board is exactly the one human move (%s)" % maskstr(board_masks(g)))
+    check(piece_kinds(g) == board_cells(*human),
+          "and the screen is that board - 23 men and the square it left bare")
+
+
 CHECKS = [("p1_boot_title_board", p1_boot_title_board),
           ("p2_start_position", p2_start_position),
           ("p3_select_and_highlight", p3_select_and_highlight),
@@ -1418,7 +1771,8 @@ CHECKS = [("p1_boot_title_board", p1_boot_title_board),
           ("p5_promotion_stops_chain", p5_promotion_stops_chain),
           ("p6_win_and_restart", p6_win_and_restart),
           ("p7_responsiveness", p7_responsiveness),
-          ("p8_one_step_per_tap", p8_one_step_per_tap)]
+          ("p8_one_step_per_tap", p8_one_step_per_tap),
+          ("p10_ai_opponent", p10_ai_opponent)]
 
 
 def main(rom, mapfile):
