@@ -90,7 +90,9 @@ gfx:
 
 # The Super Game Boy border: art/border_sgb.png (256x224; the 160x144 game area
 # at x=48,y=40 is transparent) -> border_data.c/.h, committed like gfx.h so a
-# plain `make` needs no Python. -pack_mode sgb is what gets the SGB layout --
+# plain `make` needs no Python.  The PNG is itself generated -- tools/mkborder.py
+# draws it, the way mkgfx.py draws the tiles -- so an art change is that script
+# plus this recipe, in that order.  -pack_mode sgb is what gets the SGB layout --
 # 4bpp tiles, a 256x224 map, one attribute byte per cell -- instead of a GB
 # screen; -use_map_attributes keeps that byte, which is the per-cell palette.
 # -b 1 is what makes png2asset write `#pragma bank 1` at the top of the output;

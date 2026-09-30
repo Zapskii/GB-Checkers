@@ -148,20 +148,30 @@ Undo and the opening deal are not animated: they are instant.
 
 ## Super Game Boy
 
-On an SGB the board is framed by `art/border_sgb.png`, sent at boot. It is
-drawn once and only when `sgb_check()` passes, so an ordinary DMG boots exactly
-as it did before. The one thing worth knowing: `set_sgb_border()` loads the
-border's tiles into the tile bank the board uses, so `main.c` reloads `gfx_tiles`
-straight afterwards - this game's boot path does not otherwise touch the bank at
-that point.
+On an SGB the board is framed by `art/border_sgb.png` -- a green baize surround,
+a checkerboard bezel round the screen, and crowned and uncrowned draughts down
+the sides, drawn by `tools/mkborder.py` in 13 colours. It is sent at boot and
+only when `sgb_check()` passes, so an ordinary DMG boots exactly as it did
+before. The one thing worth knowing: `set_sgb_border()` loads the border's tiles
+into the tile bank the board uses, so `main.c` reloads `gfx_tiles` straight
+afterwards - this game's boot path does not otherwise touch the bank at that
+point.
+
+The border is a generated file, like `gfx.h`: edit `tools/mkborder.py` and run
+`make border`. Its lettering is not a second font - the script parses the 5x7
+glyphs out of `mkgfx.py`, so the border says GB DRAUGHTS in the same hand as the
+status row, and the discs are the board's own shape (outline, body, groove ring,
+and a cross for kings).
 
 Nothing automated can see it. PyBoy emulates a DMG, where the whole path is
 skipped, and a ROM built without `-Wm-ys` has its SGB packets discarded so mGBA
 emulates a plain DMG too. `make probe` therefore asserts the ROM's bytes (the SGB
 flag, the old-licensee byte, and that the border data is linked in whole), and
-the artwork itself is a check by eye - confirmed in mGBA 0.10.5 on 2026-09-30,
-which renders the border **with no SGB BIOS configured**, so there is nothing to
-install first.
+the artwork itself is a check by eye. Two eyeballs have been done: the previous
+artwork rendered in mGBA 0.10.5 on 2026-09-30 with **no SGB BIOS configured**, so
+there is nothing to install first - and this artwork, which replaced it, is the
+one owed. Until it is looked at, what is verified here is bytes and addresses,
+not pixels.
 
 ## Not implemented yet (by design, see the plan)
 
@@ -187,7 +197,8 @@ install first.
     make probe    # headless PyBoy checks against the built ROM
     make geom     # regenerate board_geom.h from boardgen.py (committed)
     make gfx      # regenerate gfx.h from mkgfx.py (committed)
-    make border   # regenerate border_data.c from art/border_sgb.png (committed)
+    make border   # regenerate border_data.c from the PNG (committed; the PNG
+                  #   itself comes from tools/mkborder.py)
     make usage    # ROM/RAM headroom
     make image    # build the Docker toolchain image (only needed once)
     make clean
@@ -206,6 +217,7 @@ list the statics the probe reads), so if you want the release binary, run
 | `mkgfx.py`         | Generates `gfx.h` (tile art, ids, the cursor sprite and the glide's piece sprites) |
 | `gfx.h`            | Generated, committed. Included by `main.c` only               |
 | `art/border_sgb.png` | The SGB border artwork (256x224, game area transparent)     |
+| `tools/mkborder.py` | Draws that PNG, lettering included - the border's `mkgfx.py`  |
 | `border_data.c/.h` | Generated from that PNG, committed, like `gfx.h`              |
 | `sgb_border.c/.h`  | Sends the CHR_TRN/PCT_TRN packets; byte-identical to the siblings |
 | `sim.h`            | Pure rules engine (move gen, capture, chains, promotion) and the search; no GBDK |
@@ -220,15 +232,15 @@ list the statics the probe reads), so if you want the release binary, run
 | Bank    | Size  | Used        | Free        |
 |---------|-------|-------------|-------------|
 | ROM_0   | 16384 | 11777 (72%) | 4607 (28%)  |
-| ROM_1   | 16384 | 7744 (47%)  | 8640 (53%)  |
+| ROM_1   | 16384 | 5312 (32%)  | 11072 (68%) |
 | WRAM_LO | 4096  | 1974 (48%)  | 2122 (52%)  |
 
 The AI is most of the WRAM: its search arena is `AI_MAX_PLY` `AiFrame`s, about a
 kilobyte, held at file scope in `main.c` rather than on the stack - a kilobyte of
 stack on a DMG is not "large", it is a crash.
 
-The SGB border's blobs are why bank 1 is no longer empty. They are 5920 bytes
-of tiles, 1792 of map and 32 of palettes - 7744 in all - and they sit at 0x4000
+The SGB border's blobs are most of bank 1. They are 3488 bytes of tiles, 1792 of
+map and 32 of palettes - 5312 in all - and they sit at 0x4000
 and above, placed there by `#pragma bank 1` in `border_data.c` (which `make
 border` writes, via `png2asset -b 1`) and the `-Wl-b_CODE_1=0x4000` area in
 `LCCFLAGS`. The cart is ROM-only, so bank 1 is permanently mapped across
@@ -237,8 +249,14 @@ border` writes, via `png2asset -b 1`) and the `-Wl-b_CODE_1=0x4000` area in
 beside the code in bank 0, which is where the room was running out. Anything
 substantial from here - link cable play - can take the same route.
 
+Drawing this game's own border, rather than shipping the one ported from
+GB-Protector at P13, took the tile blob from 185 tiles (5920 bytes) to 109
+(3488) - a smaller picture, because flat shapes on an 8-pixel grid repeat where
+a starfield does not. That is 2432 bytes back.
+
 Neither the glide (P17, 1352 bytes of bank 0: 256 of sprite art and the rest
-code) nor undo (P16, 416 bytes of WRAM) needed it. Bank 0 has 4607 bytes free.
+code) nor undo (P16, 416 bytes of WRAM) needed the banking. Bank 0 has 4607
+bytes free.
 
 ## How the board is represented
 

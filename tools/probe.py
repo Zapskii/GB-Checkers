@@ -2075,7 +2075,15 @@ SGB_FLAG = 0x0146               # 0x03 = the cart claims SGB support
 OLD_LICENSEE = 0x014B           # 0x33 = "SGB"
 # The sizes the border blobs are linked at, from border_data.h.  Used to prove
 # the data is in the ROM at FULL length rather than just named in the map.
-BORDER_TILES_BYTES = 5920       # border_data_tiles[]
+#
+# These are the ART's own sizes, not the format's, so re-drawing the border
+# moves the first one: it was 5920 while the ROM carried GB-Protector's borrowed
+# artwork and it is 3488 for GB-Draughts' own (109 tiles, down from 185).  The
+# check reads the linked addresses, so it cannot notice the art changing on its
+# own -- it fails, and the number wants updating from border_data.h.  That is
+# the intended behaviour: P13's evidence row says a change to art/border_sgb.png
+# or border_data.* re-opens it rather than inheriting its PASS.
+BORDER_TILES_BYTES = 3488       # border_data_tiles[]
 BORDER_PAL_BYTES = 32           # border_data_palettes: 16 palette_color_t
 BORDER_MAP_BYTES = 1792         # border_data_map[] (and its attribute alias)
 # P15: bank 1, the 0x4000 bank window.  The cart is ROM-only, so bank 1 is
@@ -2142,7 +2150,13 @@ def p13_sgb_border(g):
     0x0146 is 0x00.  0x014B does NOT move with it -- it reads 0x33 either way,
     which is the toolchain's own default old-licensee byte, not something
     -Wm-ys writes.  It is asserted because an SGB cartridge should carry it,
-    and it is honest about being a companion rather than the control."""
+    and it is honest about being a companion rather than the control.
+
+    THE ART IS THE ONE INPUT HERE THAT THIS CHECK CANNOT SEE.  It reads where
+    the blobs are linked, not what is in them, so a re-drawn border keeps
+    passing the flag and the addresses and only trips the length check -- which
+    is why the length is a constant read out of border_data.h by hand.  The
+    pixels are still an eyeball; nothing here has ever seen one."""
     print("P13 the ROM declares SGB and carries the border data")
 
     rom = open(g.rom, "rb").read()
@@ -2172,7 +2186,7 @@ def p13_sgb_border(g):
 
     # Non-empty means at full length: the tile blob runs right up to the map
     # blob in the map's own listing, and a truncated or stubbed array would
-    # leave a gap that is not 5920.
+    # leave a gap that is not the declared 3488.
     check(b["map"] - b["tiles"] == BORDER_TILES_BYTES,
           "the tile blob is all %d bytes on the ROM (tiles 0x%04X -> map "
           "0x%04X)" % (BORDER_TILES_BYTES, b["tiles"], b["map"]))
