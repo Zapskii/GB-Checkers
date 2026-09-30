@@ -142,6 +142,8 @@ class Game:
 def p1_boot_title_board(g):
     """Title drawn from font tiles, and START reaches an 8x8 checkerboard."""
     print("P1 title screen")
+    g.run(150)          # the Game constructor ticks NOTHING: without this every
+                        # read below is of an emulator that has not run main() yet
     t = g.find_text("GB DRAUGHTS")
     s = g.find_text("PRESS START")
     check(len(t) > 0, "the title spells GB DRAUGHTS at %r" % (t,))
@@ -151,11 +153,15 @@ def p1_boot_title_board(g):
 
     print("P1 board grid after START")
     g.start()
-    tiles = g.board_tiles()
-    dark = sorted(k for k, v in tiles.items() if v == T_DARK)
-    light = sorted(k for k, v in tiles.items() if v == T_BLANK)
-    check(len(dark) == 32, "exactly 32 dark tiles in the board region (%d)" % len(dark))
-    check(len(light) == 32, "exactly 32 light tiles in the board region (%d)" % len(light))
+    # Counted per SQUARE, not per tile.  A square is a 2x2 block of tiles, so
+    # the 32 dark squares are 128 dark tiles and a tile count can never be 32 --
+    # counting tiles here would fail on a perfectly correct board.  A square
+    # whose four tiles disagree is neither dark nor light, so the pair of
+    # counts still has to total 64.
+    dark = [(r, c) for r in range(8) for c in range(8) if g.cell_is(r, c, T_DARK)]
+    light = [(r, c) for r in range(8) for c in range(8) if g.cell_is(r, c, T_BLANK)]
+    check(len(dark) == 32, "exactly 32 dark cells in the board region (%d)" % len(dark))
+    check(len(light) == 32, "exactly 32 light cells in the board region (%d)" % len(light))
 
     bad = []
     for row in range(8):

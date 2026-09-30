@@ -54,6 +54,14 @@ sym: $(SRCS)
 probe: sym
 	$(PY) tools/probe.py $(ROM) $(ROM:.gb=.map)
 
+# Screenshot, for the things the tilemap cannot show. Writes to /tmp: anything
+# left in the repo root is an untracked file, and an untracked file outside a
+# phase's allowlist fails that phase.
+FRAMES ?= 120
+SCRIPT ?=
+shot: $(ROM)
+	$(PY) tools/shot.py $(ROM) /tmp/$(ROM:.gb=.png) $(FRAMES) "$(SCRIPT)"
+
 test: tests/test_sim
 	./tests/test_sim
 
@@ -75,4 +83,4 @@ image:
 clean:
 	rm -f $(ROM) *.map *.noi *.o *.lst *.sym *.ihx *.asm *.adb tests/test_sim
 
-.PHONY: all test geom gfx sym probe usage image clean
+.PHONY: all test geom gfx sym probe shot usage image clean
