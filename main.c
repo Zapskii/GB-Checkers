@@ -304,6 +304,52 @@ static void refresh_moves(void)
     compute_legal();
 }
 
+/* ------------------------------------------------------------------ sound
+ * Three beeps, written where the sound is made.  No audio module for three
+ * register sets: the whole of the sound is the writes below.
+ *
+ * A hop clicks on CH1, a capture thuds on CH2, a crowning hop crashes on CH4.
+ * Every envelope is decreasing (NRx2 bit 3 clear), so each sound decays to
+ * silence on its own and nothing ever has to switch a channel off afterwards
+ * - the envelope IS the length.  The win jingle the brief holds back is not
+ * here; CH3 is untouched by this file.
+ *
+ * These are called from play() and NOWHERE else - not from draw_*, not from
+ * handle_input().  play() is the one path both sides' moves go through, so
+ * the machine's hops sound exactly like the human's, and the one place a
+ * sound can fire is the one place a hop happens: a call in the frame loop or
+ * in the input handler would fire on frames where nothing moved.
+ *
+ * The high frequency register's top bit is the trigger; writing it restarts
+ * the channel from the first byte of its envelope.  Without it a second hop
+ * would only rewrite registers of a channel that is already running, and the
+ * second click would be inaudible. */
+static void play_move(void)
+{
+    NR11_REG = 0x80;                /* 50% duty, no length counter */
+    NR12_REG = 0x93;                /* volume 9, decreasing, period 3 */
+    NR13_REG = 0xC0;                /* freq 0x7C0 -> 2048 Hz: a click */
+    NR14_REG = 0x87;                /* trigger + freq high bits */
+}
+
+/* CH2 has no hardware sweep - that is NR10 on CH1 - so "a sweep" here is an
+ * envelope that falls away fast over a low note, which is what a capture
+ * sounds like. */
+static void play_capture(void)
+{
+    NR21_REG = 0x80;                /* 50% duty, no length counter */
+    NR22_REG = 0x81;                /* volume 8, decreasing, period 1 */
+    NR23_REG = 0x00;                /* freq 0x400 -> 128 Hz: a thud under */
+    NR24_REG = 0x84;                /* trigger + freq high bits */
+}
+
+static void play_promote(void)
+{
+    NR42_REG = 0x53;                /* volume 5, decreasing, period 3 */
+    NR43_REG = 0x26;                /* 15-bit noise, shift 2, divisor 6 */
+    NR44_REG = 0x80;                /* trigger */
+}
+
 /* Plays the move that goes from `from` to `to`.  The move comes straight out of
  * the list the screen is showing, so what gets applied is exactly what was
  * highlighted - and for the machine, exactly what the search chose.
@@ -351,12 +397,27 @@ static void play(uint8_t from, uint8_t to)
     for (i = 0; i < n_moves; i++) {
         Move m = moves[i];
         Board before;
+        uint8_t promoted;
 
         if (m.from != from || m.to != to) continue;
 
         before = board;
         board = apply_move(board, m);
-        if (m.capture != NO_SQ && !move_causes_promotion(&before, m) &&
+        promoted = move_causes_promotion(&before, m);
+
+        /* The sounds, and the only place they are made.  Every hop clicks; a
+         * capture adds its thud underneath; a crowning hop adds the crash, so
+         * a capturing promotion plays two - on two different channels, which
+         * is why they are split by channel rather than by one volume.  As
+         * with the branch below, `promoted` comes from the PRE-move board: by
+         * this line apply_move has already crowned the piece in `board`, and
+         * a test made on that board could not tell a crowning hop from a
+         * king's move. */
+        play_move();
+        if (m.capture != NO_SQ) play_capture();
+        if (promoted) play_promote();
+
+        if (m.capture != NO_SQ && !promoted &&
             must_continue(&board, m.to)) {
             chain_sq = m.to;
             sel = m.to;               /* the same piece is still up */
@@ -765,6 +826,18 @@ void main(void)
     put_ring(SPR_SEL, NO_SQ);
     BGP_REG  = 0xE4;                /* 3 2 1 0, darkest to lightest */
     OBP0_REG = 0xE4;
+    /* The APU, on - without this the three play_* sounds are silence and
+     * nothing says so.  This ROM arrives here with NR52 bit 7 CLEAR (the boot
+     * ROM powers the APU up, GBDK's crt0 powers it back down) and while that
+     * bit is clear the sound registers cannot be written and read as zero, so
+     * every play_move/play_capture/play_promote write would vanish silently.
+     * MEASURED, not assumed: the probe reads NR52 = 0x70 - bit 7 clear, all
+     * four channels off - in this ROM without the three lines below.  NR50
+     * and NR51 go with it because powering the APU on resets the routing, and
+     * a channel routed nowhere is the same silence by another route. */
+    NR52_REG = 0x80;                /* APU on */
+    NR50_REG = 0x77;                /* both outputs, full volume */
+    NR51_REG = 0xFF;                /* all four channels to both outputs */
     SPRITES_8x8;
     SHOW_BKG;
     SHOW_SPRITES;                   /* nothing marked yet: both rings parked

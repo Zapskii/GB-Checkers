@@ -87,7 +87,13 @@ def check(cond, msg):
 
 class Game:
     def __init__(self, rom, mapfile):
-        self.p = PyBoy(rom, window="null", sound_emulated=False)
+        # sound_emulated=True is REQUIRED by p12_sfx, and costs nothing else
+        # (P11's frame counts are unmoved by it).  With sound off, PyBoy does
+        # not implement the APU at all: every NRx register reads 0x00 forever
+        # and writes to them are swallowed, so a register-based sound check on
+        # that build fails on every ROM - the pre-phase one AND the phase's own
+        # - which is a check that reads as "has power" and is really noise.
+        self.p = PyBoy(rom, window="null", sound_emulated=True)
         self.addr = parse_map(mapfile)
 
     def need(self, *names):
@@ -1920,6 +1926,116 @@ def p11_think_budget(g):
               % (label,))
 
 
+# --------------------------------------------------------------- P12 -------
+# The APU's registers, straight out of the hardware memory map.  Two things
+# about reading them here:
+#
+#   - PyBoy only implements them when it was built with sound_emulated=True
+#     (see the Game constructor).  With sound off every one of these reads
+#     0x00 forever and writes vanish, so a register check written against that
+#     build fails on EVERY ROM.  It would gate as "has power" and then fail
+#     the phase it was written for.  The switch went on first, and P11's frame
+#     counts are unchanged by it.
+#   - The DMG boot ROM plays its own jingle on CH1/CH2 for ~60 frames, so a
+#     reading taken just after START is the emulator's boot noise, not this
+#     ROM's writes.  Every comparison below is a before/after pair taken
+#     around a hop, hundreds of frames after boot, and never an absolute
+#     reading of a register the boot ROM itself drives.
+NR12, NR22, NR42, NR52 = 0xFF12, 0xFF17, 0xFF21, 0xFF26
+
+# main.c's envelope bytes, mirrored here the way T_PIECE and the State enum
+# already are.  Retuning a sound means moving both, which is deliberate: this
+# is the contract for what one hop writes, not an independent opinion.
+MOVE_ENV, CAPTURE_ENV, PROMOTE_ENV = 0x93, 0x81, 0x53
+
+
+def p12_sfx(g):
+    """A hop clicks, a capture thuds, a crown crashes - and play() is the only
+    place any of them is made.
+
+    PyBoy has no ears, so nothing here can hear anything.  What it can read is
+    the APU's registers, and those ARE the sound: each of main.c's three
+    sounds is one register set with its envelope written into it, so "the byte
+    is what main.c wrote" is the whole of the noise.  The other half of the
+    deliverable - that the three are audibly distinct - is confirmed once by
+    ear in mGBA, not here; that half is an eyeball, and the gate is the bytes.
+
+    Every part pairs a positive control with its assertion.  "CH2 did not
+    change on a quiet move" is true of a ROM with no sound code in it at all,
+    so the quiet move also has to prove CH1 DID change; likewise each sound is
+    only claimed once the hop that should have made it is shown to have
+    happened, by the board.
+    """
+    print("P12 a quiet hop clicks on CH1 and leaves CH2 alone")
+    g.start()
+    if not g.need("board", "side", "cursor", "sel", "state", "n_moves", "moves"):
+        return
+
+    # --- a quiet move -----------------------------------------------------
+    # p4's move played the p4 way: pick the man on 9 up, cycle to 13, A.
+    ch1_0, ch2_0 = g.p.memory[NR12], g.p.memory[NR22]
+    set_cursor(g, 9)
+    tap(g, "A")
+    check(cycle_to(g, 13), "the cursor cycles to 13 (%d)" % g.var("cursor"))
+    tap(g, "A")
+    ch1_1, ch2_1 = g.p.memory[NR12], g.p.memory[NR22]
+    check(g.var("side") == SIDE_WHITE,
+          "the quiet move really was played - the turn passed (%d)"
+          % g.var("side"))
+    check(ch1_1 == MOVE_ENV and ch1_1 != ch1_0,
+          "the hop wrote CH1's envelope: NR12 0x%02X -> 0x%02X, main.c's "
+          "0x%02X" % (ch1_0, ch1_1, MOVE_ENV))
+    check(ch2_1 == ch2_0,
+          "and left CH2 alone - a quiet move is not a capture: NR22 unchanged "
+          "at 0x%02X" % ch2_1)
+
+    # --- a capture --------------------------------------------------------
+    print("P12 a capture thuds on CH2")
+    # p4's mandatory-capture position: a black man on 9 able to jump either of
+    # 13 and 14, and a black man on 0 with quiet moves it must not be offered.
+    # The jump played here is the one over 14, landing on 18.
+    force_position(g, (1 << 9) | (1 << 0), (1 << 13) | (1 << 14), 0, SIDE_BLACK)
+    set_cursor(g, 9)
+    ch2_0 = g.p.memory[NR22]
+    tap(g, "A")
+    check(cycle_to(g, 18), "the cursor cycles to the jump onto 18 (%d)"
+          % g.var("cursor"))
+    tap(g, "A")
+    ch2_1 = g.p.memory[NR22]
+    blk, wht, kng = board_masks(g)
+    check(not (wht & (1 << 14)) and bool(blk & (1 << 18)),
+          "the jump really was played - the black man is on 18 and the white "
+          "man on 14 is gone (black 0x%08X, white 0x%08X)" % (blk, wht))
+    check(ch2_1 == CAPTURE_ENV and ch2_1 != ch2_0,
+          "and CH2's envelope was rewritten for it: NR22 0x%02X -> 0x%02X, "
+          "main.c's 0x%02X" % (ch2_0, ch2_1, CAPTURE_ENV))
+    check(bool(g.p.memory[NR52] & 0x80),
+          "with the APU on, so the writes were not swallowed (NR52 0x%02X)"
+          % g.p.memory[NR52])
+
+    # --- a promotion ------------------------------------------------------
+    print("P12 a crown crashes on CH4")
+    # p5's promotion position: 21 -SE-> 30 over 25, and 30 is in row 7, so the
+    # man crowns on landing.  A promoting CAPTURE on purpose - it is the hop
+    # that fires two of the three sounds, on two different channels, and this
+    # is where "one register set per sound, split by channel" pays off.
+    force_position(g, 1 << 21, (1 << 25) | (1 << 26), 0, SIDE_BLACK)
+    set_cursor(g, 21)
+    ch4_0 = g.p.memory[NR42]
+    tap(g, "A")
+    check(cycle_to(g, 30), "the cursor cycles to the crowning square, 30 (%d)"
+          % g.var("cursor"))
+    tap(g, "A")
+    ch4_1 = g.p.memory[NR42]
+    blk, wht, kng = board_masks(g)
+    check(bool(kng & (1 << 30)),
+          "the hop really crowned - the piece on 30 is a king (kings 0x%08X)"
+          % kng)
+    check(ch4_1 == PROMOTE_ENV and ch4_1 != ch4_0,
+          "and CH4's envelope was rewritten for it: NR42 0x%02X -> 0x%02X, "
+          "main.c's 0x%02X" % (ch4_0, ch4_1, PROMOTE_ENV))
+
+
 CHECKS = [("p1_boot_title_board", p1_boot_title_board),
           ("p2_start_position", p2_start_position),
           ("p3_select_and_highlight", p3_select_and_highlight),
@@ -1931,7 +2047,8 @@ CHECKS = [("p1_boot_title_board", p1_boot_title_board),
           ("p7_responsiveness", p7_responsiveness),
           ("p8_one_step_per_tap", p8_one_step_per_tap),
           ("p10_ai_opponent", p10_ai_opponent),
-          ("p11_think_budget", p11_think_budget)]
+          ("p11_think_budget", p11_think_budget),
+          ("p12_sfx", p12_sfx)]
 
 
 def main(rom, mapfile):
