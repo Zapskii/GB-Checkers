@@ -288,6 +288,146 @@ static void test_promotion_stops_chain(void)
      * above is what actually ends the turn. */
 }
 
+/* -------------------------------------------------------------- search */
+/* The AI (M2) may only ever return a move the engine handed it. These
+ * check the contract, not the strength: whatever the weights say, a
+ * search that invents a move is playing a different game from a human
+ * and would break mandatory capture silently. */
+
+static AiFrame arena[AI_MAX_PLY];
+
+static Move mv_of(uint8_t from, uint8_t to, uint8_t capture)
+{
+    Move m;
+    m.from = from; m.to = to; m.capture = capture;
+    return m;
+}
+
+/* Whole-move equality. Comparing `.to` alone is not enough: two different
+ * legal moves can share a destination (a man 9->13 and a king 18->13). */
+static uint8_t same_move(Move a, Move b)
+{
+    return (uint8_t)(a.from == b.from && a.to == b.to && a.capture == b.capture);
+}
+
+/* The score has a sign and a size: black is two men up in a quiet
+ * position, so evaluate() must say roughly +200, not 0 and not a material
+ * figure with the wrong sign. This is the check that catches a stubbed or
+ * zeroed evaluator. */
+static void test_search_scores_material(void)
+{
+    Board b = empty_board();
+    Move mv[MAX_MOVES], out;
+    uint8_t n, i;
+    int16_t sc;
+
+    put(&b, 9, SIDE_BLACK, 0);
+    put(&b, 13, SIDE_BLACK, 0);
+    put(&b, 17, SIDE_BLACK, 0);
+    put(&b, 27, SIDE_WHITE, 0);      /* far away: nothing can capture */
+
+    n = gen_moves(&b, SIDE_BLACK, mv);
+    CHECK(n == 4);
+    for (i = 0; i < n; i++) CHECK(mv[i].capture == NO_SQ);   /* quiet: eval only */
+
+    /* zero-sum: the same board seen from the other side negates */
+    CHECK(evaluate(&b, SIDE_BLACK) == (int16_t)-evaluate(&b, SIDE_WHITE));
+
+    sc = search_best(b, SIDE_BLACK, 1, arena, &out);
+    CHECK(sc >= 200 && sc <= 215);   /* 3 men vs 1 = +200, plus mobility */
+}
+
+/* Two captures on offer: taking one man with the piece that gets
+ * recaptured, or taking two with the other piece. The 2-for-1 must win -
+ * and the cheap route is deliberately offered FIRST (square 9 before
+ * square 15), so "return moves[0]" is not a passing answer. */
+static void test_search_prefers_the_two_for_one(void)
+{
+    Board b = empty_board();
+    Move mv[MAX_MOVES], out;
+    uint8_t n, d;
+
+    put(&b, 9, SIDE_BLACK, 0);
+    put(&b, 15, SIDE_BLACK, 0);
+    put(&b, 13, SIDE_WHITE, 0);      /* 9 jumps it, then white 20 recaptures 16 */
+    put(&b, 18, SIDE_WHITE, 0);      /* 15 jumps 18, then 25: two for one */
+    put(&b, 20, SIDE_WHITE, 0);
+    put(&b, 25, SIDE_WHITE, 0);
+
+    n = gen_moves(&b, SIDE_BLACK, mv);
+    CHECK(n == 2);
+    CHECK(same_move(mv[0], mv_of(9, 16, 13)));    /* the trap is offered first */
+    CHECK(same_move(mv[1], mv_of(15, 22, 18)));
+
+    for (d = 1; d <= 3; d++) {
+        search_best(b, SIDE_BLACK, d, arena, &out);
+        CHECK(same_move(out, mv_of(15, 22, 18)));
+    }
+}
+
+/* A king is worth more than a man: given a choice of captures, take the
+ * king. One black king, two white pieces next to it - a man NW, a king
+ * SW, so the man's route comes first in direction order as well. */
+static void test_search_takes_the_king(void)
+{
+    Board b = empty_board();
+    Move mv[MAX_MOVES], out;
+    uint8_t n, d;
+
+    put(&b, 22, SIDE_BLACK, 1);      /* black king: NW=17, SW=25 */
+    put(&b, 17, SIDE_WHITE, 0);
+    put(&b, 25, SIDE_WHITE, 1);
+
+    n = gen_moves(&b, SIDE_BLACK, mv);
+    CHECK(n == 2);
+    CHECK(same_move(mv[0], mv_of(22, 13, 17)));   /* man first */
+    CHECK(same_move(mv[1], mv_of(22, 29, 25)));   /* king second */
+
+    for (d = 1; d <= 3; d++) {
+        search_best(b, SIDE_BLACK, d, arena, &out);
+        CHECK(same_move(out, mv_of(22, 29, 25)));
+    }
+}
+
+/* An out-move is only ever written when there is a move to write. */
+static void test_search_no_moves_leaves_out_alone(void)
+{
+    Board b = empty_board();
+    Move mv[MAX_MOVES];
+    Move out = mv_of(7, 7, 7);
+    int16_t sc;
+
+    put(&b, 9, SIDE_WHITE, 0);       /* black has nothing at all */
+    CHECK(gen_moves(&b, SIDE_BLACK, mv) == 0);
+    sc = search_best(b, SIDE_BLACK, 2, arena, &out);
+    CHECK(sc == (int16_t)-AI_WIN_SCORE);          /* a loss, scored at the root */
+    CHECK(same_move(out, mv_of(7, 7, 7)));        /* untouched */
+}
+
+/* Depth 0 searches nothing, so it has no move to report either. Same
+ * contract as a loss, and a different path to it: the root's move list is
+ * never walked, so best_move is never assigned and must not be written out.
+ * A caller wired straight to play() would otherwise play from/to/capture
+ * that were never chosen - `to` can even be a square that does not exist. */
+static void test_search_depth_zero_leaves_out_alone(void)
+{
+    Board b = empty_board();
+    Move mv[MAX_MOVES];
+    Move out = mv_of(NO_SQ, NO_SQ, NO_SQ);
+    int16_t sc;
+
+    put(&b, 9, SIDE_BLACK, 0);
+    put(&b, 13, SIDE_BLACK, 0);
+    put(&b, 17, SIDE_BLACK, 0);
+    put(&b, 27, SIDE_WHITE, 0);
+
+    CHECK(gen_moves(&b, SIDE_BLACK, mv) > 0);      /* a move does exist ... */
+    sc = search_best(b, SIDE_BLACK, 0, arena, &out);
+    CHECK(sc == evaluate(&b, SIDE_BLACK));         /* ... depth 0 is the eval */
+    CHECK(sc > 0);                                 /* and a real one, not 0 */
+    CHECK(same_move(out, mv_of(NO_SQ, NO_SQ, NO_SQ)));
+}
+
 /* --------------------------------------------------------- random fuzz */
 
 /* Plays randomly-legal games to a ply cap, asserting invariants after
@@ -296,7 +436,11 @@ static void test_promotion_stops_chain(void)
  * whole games: it can't prove no illegal position is ever reachable, but
  * it exercises mandatory capture, chains, and promotion together across
  * thousands of random positions, which the hand-built tests above can't.
- */
+ *
+ * With `depth` non-zero it also asks the search for a move at every turn
+ * start and requires it to be one of the legal ones (all fields, not just
+ * the destination). Turn start only: search_best() is a turn-start entry
+ * point, and mid-chain the rule in force is the other one. */
 static void check_invariants(const Board *b, int prev_pieces)
 {
     int pieces = popcount32(b->black) + popcount32(b->white);
@@ -305,7 +449,7 @@ static void check_invariants(const Board *b, int prev_pieces)
     CHECK(pieces <= prev_pieces);                    /* never gains pieces */
 }
 
-static void fuzz_self_play(unsigned seed, int max_ply)
+static void fuzz_self_play(unsigned seed, int max_ply, uint8_t depth, int *searched)
 {
     Board b = board_init();
     uint8_t side = SIDE_BLACK;
@@ -320,6 +464,19 @@ static void fuzz_self_play(unsigned seed, int max_ply)
         Board before;
 
         if (!n) break;                     /* side to move has lost */
+
+        if (depth) {
+            /* A move the caller can recognise as "never written". */
+            Move out = mv_of(NO_SQ, NO_SQ, NO_SQ);
+            int16_t sc = search_best(b, side, depth, arena, &out);
+            uint8_t i, legal = 0;
+
+            CHECK(sc > (int16_t)-AI_WIN_SCORE);   /* has moves, so not a loss */
+            for (i = 0; i < n; i++) if (same_move(out, mv[i])) legal = 1;
+            CHECK(legal);                         /* chose, never invented */
+            if (searched) (*searched)++;
+        }
+
         chosen = mv[rand() % n];
         before = b;
         b = apply_move(b, chosen);
@@ -346,7 +503,16 @@ static void fuzz_self_play(unsigned seed, int max_ply)
 static void test_fuzz_many_seeds(void)
 {
     unsigned s;
-    for (s = 1; s <= 200; s++) fuzz_self_play(s, 400);
+    for (s = 1; s <= 200; s++) fuzz_self_play(s, 400, 0, (int *)0);
+}
+
+/* The same random games, with the search asked at every turn start. */
+static void test_search_stays_legal(void)
+{
+    unsigned s;
+    int searched = 0;
+    for (s = 1; s <= 200; s++) fuzz_self_play(s, 24, 2, &searched);
+    CHECK(searched >= 200);     /* the games really did reach positions */
 }
 
 int main(void)
@@ -364,6 +530,12 @@ int main(void)
     test_man_cannot_move_backward();
     test_promotion();
     test_promotion_stops_chain();
+    test_search_scores_material();
+    test_search_prefers_the_two_for_one();
+    test_search_takes_the_king();
+    test_search_no_moves_leaves_out_alone();
+    test_search_depth_zero_leaves_out_alone();
+    test_search_stays_legal();
     test_fuzz_many_seeds();
     printf("OK: %d checks passed\n", checks);
     return 0;
