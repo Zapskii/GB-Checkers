@@ -975,13 +975,154 @@ def p5_promotion_stops_chain(g):
           % ([g.tile(x, y) for x, y in cells(6, 3)],))
 
 
+# ---------------------------------------------------------------- P6 --------
+# main.c's State enum grows a fourth value.  ST_OVER is a local name here (the
+# enum is a #define-land detail, the map holds no symbol for it), so this
+# check has no `need()` to ask for: on P5's ROM every symbol it touches exists
+# and it fails on BEHAVIOUR instead - the position below is still ST_SELECT,
+# carries no result banner, and START does nothing at all.
+ST_OVER = 3
+
+
+def p6_setup_stuck(g):
+    """Black man on square 0, white man on square 1, black to move.
+
+    Square 1 is row 0 (SQ_ROW(1) == 0) and NEIGH[1][NW] = NEIGH[1][NE] = NO_SQ,
+    so a WHITE man parked there is on its own far edge and can never move
+    again - not "cannot move right now", cannot ever.  Black's man on square 0
+    has two perfectly good quiet moves (NEIGH[0][SW] = 4, NEIGH[0][SE] = 5).
+    So black has a move and white, once it is white's turn, has none at all."""
+    a = g.addr["board"]
+    g.p.memory[a:a + 12] = board_bytes(1 << 0, 1 << 1, 0)
+    g.p.memory[g.addr["side"]:g.addr["side"] + 1] = bytes([SIDE_BLACK])
+    g.p.memory[g.addr["cursor"]:g.addr["cursor"] + 1] = bytes([0])
+    g.run(20)                     # a couple of game iterations, so the screen
+                                  # has redrawn from the written board too
+
+
+def p6_play_it_out(g):
+    """Play 0 -> 4: A to pick the man on 0 up, LEFT (main.c's DIR_SW) to walk
+    the cursor onto its landing square, A to move it."""
+    tap(g, "A")
+    g.run(30, "L")
+    g.run(14)
+    tap(g, "A")
+
+
+def p6_win_and_restart(g):
+    """A turn that leaves the other side with nothing to play ends the game,
+    and START (or B) starts a new one."""
+    print("P6 win and restart")
+    g.start()
+    if not g.need("board", "side", "state", "cursor", "sel", "n_moves", "moves"):
+        return
+
+    p6_setup_stuck(g)
+    ms = legal_moves(g)
+    check(len(ms) == 2 and all(m["from"] == 0 and m["capture"] == NO_SQ
+                               for m in ms),
+          "black's whole legal set is the man on 0's two quiet moves (%r)"
+          % (ms,))
+    check(g.var("state") == ST_SELECT,
+          "the game is running before the move (state %d)" % g.var("state"))
+    check(g.find_text("WINS") == [],
+          "and no banner is on the screen yet (%r)" % (g.find_text("WINS"),))
+
+    p6_play_it_out(g)
+
+    # --- the move landed, and the turn it handed over is a dead end ---------
+    blk, wht, kng = board_masks(g)
+    check(blk == 1 << 4 and wht == 1 << 1 and kng == 0,
+          "the man moved 0 -> 4 and nothing was taken or crowned (black "
+          "0x%08X, white 0x%08X, kings 0x%08X)" % (blk, wht, kng))
+    check(g.var("side") == SIDE_WHITE,
+          "the turn passed to white (side %d)" % g.var("side"))
+    check(g.var("n_moves") == 0,
+          "and white has NO move at all - the premise of the whole check (%d)"
+          % g.var("n_moves"))
+
+    # --- the assertion this phase exists for ------------------------------
+    # side_to_move_has_moves() is asked at the turn boundary, so the side that
+    # has just been handed the turn and cannot use it has lost.  A turn loop
+    # that never asks sits here in ST_SELECT and the game cannot be finished.
+    check(g.var("state") == ST_OVER,
+          "the game is over: state is ST_OVER (%d)" % g.var("state"))
+    # The brief for this phase words the expected banner as "WHITE WINS", but
+    # that is the side left with nothing to play, and the rule it states in the
+    # same breath - winner = side ^ 1, side being the side to move - makes the
+    # winner BLACK.  The stuck man has to be white either way (a man on row 0
+    # is immobile only in white's direction of travel), so the two halves of
+    # that sentence cannot both hold and the banner below is the one the rule
+    # produces.  p6 asserts the rule.
+    banner = g.find_text("BLACK WINS")
+    check(bool(banner), "the status row spells BLACK WINS (%r)" % (banner,))
+    check(g.find_text("WHITE WINS") == [],
+          "and not WHITE WINS - the banner follows the winner, it is not one "
+          "frozen string (%r)" % (g.find_text("WHITE WINS"),))
+    # The HUD keeps its one meaning - the side to move - which in ST_OVER is
+    # the side that has just been handed the turn and cannot use it.  It reads
+    # opposite to the banner on purpose: "WHITE to move" and "BLACK WINS" are
+    # the two halves of why the game stopped.
+    check(hud_word(g) == "WHITE",
+          "the HUD still names the side to move, white - the side that cannot "
+          "(%r)" % hud_word(g))
+    check(g.var("sel") == NO_SQ and hl_cells(g) == [],
+          "nothing is picked up or highlighted (%#x)" % g.var("sel"))
+    check(g.cursor_box() is None,
+          "and the cursor sprite is parked off-screen (%r)" % (g.cursor_box(),))
+    check(piece_kinds(g) == {(1, 0): 0, (0, 3): 1},
+          "the screen still shows the final position - the black man on "
+          "cell(1, 0) (sq 4), the stuck white man on cell(0, 3) (sq 1) (%r)"
+          % (sorted(piece_kinds(g).items()),))
+
+    # The board is frozen: the d-pad and A do nothing at all now.
+    g.run(150, "D")
+    g.run(14)
+    tap(g, "A")
+    check(board_masks(g) == (1 << 4, 1 << 1, 0) and g.var("state") == ST_OVER,
+          "d-pad and A do nothing on a finished game (0x%08X, 0x%08X, 0x%08X)"
+          % board_masks(g))
+
+    # --- START starts a new game ------------------------------------------
+    tap(g, "S")
+    check(g.var("side") == SIDE_BLACK,
+          "START restarts: black is to move again (side %d)" % g.var("side"))
+    check(board_masks(g) == (BLACK_START, WHITE_START, 0),
+          "and the board is the start position again (0x%08X, 0x%08X, 0x%08X)"
+          % board_masks(g))
+    check(g.var("state") == ST_SELECT,
+          "the state machine is back in play (state %d)" % g.var("state"))
+    check(g.var("cursor") == 0,
+          "the cursor is back on square 0 (%d)" % g.var("cursor"))
+    check(len(piece_kinds(g)) == 24,
+          "all 24 men are drawn again (%d)" % len(piece_kinds(g)))
+    check(g.find_text("BLACK WINS") == [],
+          "and the banner is off the screen (%r)" % (g.find_text("BLACK WINS"),))
+    check(hud_word(g) == "BLACK",
+          "the HUD names the new turn again: BLACK (%r)" % hud_word(g))
+
+    # --- and so does B ----------------------------------------------------
+    # A second game played out the same way, so "B restarts" is asserted on a
+    # real ST_OVER and not on the state the restart above left behind.
+    p6_setup_stuck(g)
+    p6_play_it_out(g)
+    check(g.var("state") == ST_OVER,
+          "played out to a second ST_OVER (state %d)" % g.var("state"))
+    tap(g, "B")
+    check(board_masks(g) == (BLACK_START, WHITE_START, 0)
+          and g.var("side") == SIDE_BLACK and g.var("state") == ST_SELECT,
+          "B restarts exactly as START does (0x%08X, 0x%08X, 0x%08X, side %d, "
+          "state %d)" % (board_masks(g) + (g.var("side"), g.var("state"))))
+
+
 CHECKS = [("p1_boot_title_board", p1_boot_title_board),
           ("p2_start_position", p2_start_position),
           ("p3_select_and_highlight", p3_select_and_highlight),
           ("p4_move_applied", p4_move_applied),
           ("p4_mandatory_capture", p4_mandatory_capture),
           ("p5_chain_continues", p5_chain_continues),
-          ("p5_promotion_stops_chain", p5_promotion_stops_chain)]
+          ("p5_promotion_stops_chain", p5_promotion_stops_chain),
+          ("p6_win_and_restart", p6_win_and_restart)]
 
 
 def main(rom, mapfile):

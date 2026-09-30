@@ -7,8 +7,14 @@
  * geometrically keep going.  Which of those two it is is decided by
  * move_causes_promotion() on the PRE-move board; see play().
  *
+ * P6 closes Milestone 1.  A turn that leaves the other side with no legal move
+ * ends the game: ST_OVER, and the result on the status row.  The question is
+ * asked at the turn boundary and nowhere else - mid-chain is not a boundary,
+ * and the side that has to lose is the one that has just been handed the turn,
+ * never the one that just moved.  START (or B) starts a new game from there.
+ *
  * Controls: START = new game, d-pad = move the cursor, A = select/play,
- * B = deselect.
+ * B = deselect (and, in ST_OVER, also new game).
  */
 #include <gb/gb.h>
 #include <stdint.h>
@@ -24,7 +30,9 @@
 #define BOARD_TH  16u
 
 #define TITLE_ROW  6u
-#define PROMPT_ROW 10u
+#define STATUS_ROW 10u   /* the one centred line of text inside the board
+                          * region: the title's prompt, and the result in
+                          * ST_OVER - the two states are exclusive */
 #define TEXT_COL   4u    /* both strings are 11 tiles wide: (20 - 11) / 2 */
 
 /* The HUD strip.  PLAN.md's data contract gives it tiles x 16..19, y 0..15 - a
@@ -46,7 +54,7 @@
 #define WALK_STEPS 4u
 #define REPEAT_DIV 8u
 
-typedef enum { ST_TITLE, ST_SELECT, ST_TARGET } State;
+typedef enum { ST_TITLE, ST_SELECT, ST_TARGET, ST_OVER } State;
 
 /* ----------------------------------------------------------------- state
  * The state machine and the rules engine's board.  The screen has no state of
@@ -227,15 +235,41 @@ static void play(uint8_t sq)
             sel = NO_SQ;
             cursor = NO_SQ;
             side = (uint8_t)(side ^ 1u);
-            state = ST_SELECT;
+
+            /* The turn really is over - a quiet move, a final capture, or a
+             * hop that promoted - so this is a turn boundary, and the only
+             * place the end-of-game question belongs.  Mid-chain it would be
+             * plain wrong twice over: the chain has not ended at all, and
+             * gen_moves() over a whole side is not the rule in force there.
+             *
+             * The side to move has just been handed the turn, so it is the one
+             * that can lose here - asking about the side that just moved would
+             * end the game on every move.  side_to_move_has_moves() is
+             * gen_moves() > 0, so "no moves" covers both an empty side and one
+             * that is merely boxed in, and it folds in mandatory capture for
+             * free: a side whose only piece can capture has a move. */
+            state = side_to_move_has_moves(&board, side) ? ST_SELECT : ST_OVER;
         }
         return;
     }
 }
 
+static void new_game(void);
+
 static void handle_input(void)
 {
-    uint8_t dir = dir_of(keys);
+    uint8_t dir;
+
+    /* The game is over: the board is frozen and the only thing left to press
+     * is a restart.  START and B both do it, and both do it through the very
+     * new_game() the title screen uses - a restart is not a second
+     * initialisation path that can quietly drift from the first. */
+    if (state == ST_OVER) {
+        if (pressed & (J_START | J_B)) new_game();
+        return;
+    }
+
+    dir = dir_of(keys);
 
     /* A fresh press steps once, at once; a held direction steps again on the
      * divider.  Splitting them keeps one press to one step whatever the frame
@@ -295,11 +329,24 @@ static void build_title(void)
     uint16_t i;
     for (i = 0; i < BOARD_TW * BOARD_TH; i++) mapbuf[i] = T_BLANK;
     text(TEXT_COL, TITLE_ROW, "GB DRAUGHTS");
-    text(TEXT_COL, PROMPT_ROW, "PRESS START");
+    text(TEXT_COL, STATUS_ROW, "PRESS START");
+}
+
+/* The result, over the middle of the board in ST_OVER.  `side` is the side to
+ * move, which is the side that has just been found to have no move at all, so
+ * the winner is the other one.  Derived from `side` rather than latched at the
+ * moment of the loss: the screen is rebuilt every frame like everything else,
+ * so a ternary is the whole of the state this needs. */
+static void build_status(void)
+{
+    text(TEXT_COL, STATUS_ROW, side == SIDE_BLACK ? "WHITE WINS" : "BLACK WINS");
 }
 
 /* Whose turn it is, straight from `side` - and blank on the title screen, where
- * there is no turn yet. */
+ * there is no turn yet.  In ST_OVER it still names `side`, which is the side
+ * that has just been handed the turn and cannot use it: the HUD keeps its one
+ * meaning ("the side to move"), the status row carries the result, and the two
+ * together say exactly why the game ended. */
 static void build_hud(void)
 {
     uint16_t i;
@@ -429,6 +476,10 @@ void main(void)
             if (sel != NO_SQ) draw_highlights();
             draw_pieces();
             move_cursor();
+            /* Over the top of the drawn pieces: the result is the one thing
+             * on the board in ST_OVER, and the pieces are still worth seeing
+             * underneath it. */
+            if (state == ST_OVER) build_status();
         }
         build_hud();
         wait_vbl_done();
