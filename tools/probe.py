@@ -585,9 +585,218 @@ def p3_select_and_highlight(g):
           % (g.visible_sprites(),))
 
 
+# ---------------------------------------------------------------- P4 --------
+# sim.h's SIDE_BLACK / SIDE_WHITE.  `side` is the symbol this phase adds to
+# main.c's state, and its absence from the map is what makes these two checks
+# fail on P3's ROM (Game.need records that as an assertion failure, not a
+# harness error, so the power gate's exit code is 1 and not 2).
+SIDE_BLACK, SIDE_WHITE = 0, 1
+
+HUD_X0, HUD_X1 = 16, 20          # PLAN.md: the HUD strip is tiles x 16..19
+
+
+def hud_word(g):
+    """The HUD strip's word, or "" when the strip carries no letters.
+
+    main.c stacks the letters down a tile column rather than writing them
+    across: the strip is 4 tiles wide and "BLACK" is 5, so sideways it would
+    run off the 20-tile screen.  Scanning every column of the strip keeps this
+    check from hardcoding which one main.c picked."""
+    for x in range(HUD_X0, HUD_X1):
+        letters = []
+        for y in range(BOARD_TH):
+            t = g.tile(x, y)
+            if t == T_BLANK:
+                continue
+            if not (T_LETTER0 <= t < T_LETTER0 + 26):
+                break
+            letters.append(chr(ord("A") + t - T_LETTER0))
+        else:
+            if letters:
+                return "".join(letters)
+    return ""
+
+
+def board_masks(g):
+    """main.c's `board`, as the three little-endian uint32s it really is."""
+    raw = bytes(g.p.memory[g.addr["board"]:g.addr["board"] + 12])
+    return tuple(int.from_bytes(raw[4 * i:4 * i + 4], "little") for i in range(3))
+
+
+def p4_move_applied(g):
+    """A on a highlighted destination moves the piece and hands the turn over."""
+    print("P4 A on a destination plays the move")
+    g.start()
+    if not g.need("board", "side", "cursor", "sel", "state", "n_moves", "moves"):
+        return
+
+    check(g.var("side") == SIDE_BLACK,
+          "black moves first (side %d)" % g.var("side"))
+    check(hud_word(g) == "BLACK",
+          "the HUD strip names the side to move: BLACK (%r)" % hud_word(g))
+
+    # Square 0 holds a black man with no legal move at the start position -
+    # p3_select_and_highlight exists to make exactly that point - so the cursor
+    # has to walk off it before there is anything to pick up.
+    g.run(150, "D")               # 0 -SE-> 5 -SE-> 9, same walk as p3
+    g.run(14)
+    check(g.var("cursor") == 9, "the cursor walked to square 9 (%d)" % g.var("cursor"))
+    tap(g, "A")
+    check(g.var("sel") == 9 and g.var("state") == ST_TARGET,
+          "A picks square 9 up (%d, state %d)" % (g.var("sel"), g.var("state")))
+
+    # 9's legal moves are to 13 and 14 (NEIGH[9] = {5, 6, 13, 14} for NW NE SW
+    # SE), so LEFT - main.c's DIR_SW - lands on 13 in one hop.
+    g.run(30, "L")
+    g.run(14)
+    check(g.var("cursor") == 13,
+          "LEFT walks the cursor from 9 onto square 13 (%d)" % g.var("cursor"))
+    check(g.cursor_xy() == (16 * sq_col(13), 16 * sq_row(13)),
+          "and the sprite followed it to cell(3, 2) = OAM (32, 48) (%r)"
+          % (g.cursor_xy(),))
+
+    tap(g, "A")
+
+    # --- the engine, straight out of WRAM --------------------------------
+    blk, wht, kng = board_masks(g)
+    check(not (blk & (1 << 9)), "black bit 9 - the square it left - is clear "
+                                "(black 0x%08X)" % blk)
+    check(bool(blk & (1 << 13)), "black bit 13 - the square it went to - is set "
+                                 "(black 0x%08X)" % blk)
+    check(bin(blk).count("1") == 12, "black still has 12 pieces (%d)"
+          % bin(blk).count("1"))
+    check(wht == WHITE_START, "white's mask is untouched (0x%08X)" % wht)
+    check(kng == 0, "a move into row 3 does not promote (kings 0x%08X)" % kng)
+    check(g.var("side") == SIDE_WHITE,
+          "the turn passed to white (side %d)" % g.var("side"))
+    check(g.var("sel") == NO_SQ and g.var("state") == ST_SELECT,
+          "the piece was let go and the state is back to ST_SELECT (%#x, %d)"
+          % (g.var("sel"), g.var("state")))
+
+    # --- and the screen followed -----------------------------------------
+    check(cell_kind(g, 3, 2) == 0,
+          "the tilemap shows a black man at cell(3, 2) (%r)" % (cell_kind(g, 3, 2),))
+    check(g.cell_is(2, 3, T_DARK),
+          "cell(2, 3), the square it came from, is bare dark board again (%r)"
+          % ([g.tile(x, y) for x, y in cells(2, 3)],))
+    check(hl_cells(g) == [], "and nothing is highlighted with nothing picked up "
+                             "(%r)" % (hl_cells(g),))
+    check(hud_word(g) == "WHITE",
+          "the HUD strip followed the turn: WHITE (%r)" % hud_word(g))
+    # main.c blits all four columns of the strip, not just the one the word
+    # sits in.  Half a strip written would leave the rest as whatever VRAM held
+    # at boot, so this is the assertion that the whole thing is defined.
+    stray = [(x, y) for x in range(HUD_X0, HUD_X1) for y in range(BOARD_TH)
+             if g.tile(x, y) != T_BLANK
+             and not (T_LETTER0 <= g.tile(x, y) < T_LETTER0 + 26)]
+    check(not stray, "the HUD strip holds nothing but blanks and letters (%r)"
+          % (stray[:4],))
+    flat = [(x, y) for x in range(HUD_X0, HUD_X1) for y in range(BOARD_TH)
+            if g.tile(x, y) == T_BLANK and g.px(8 * x, 8 * y) != LIGHT_BG]
+    check(not flat, "and its blank tiles render as the light background, so the "
+                    "whole strip was written and not left as boot VRAM (%r)"
+          % (flat[:4],))
+    # The drawn pieces are the engine's board, square for square - the same
+    # seam p2 asserts, but now across a move rather than across a boot.  Both
+    # directions are checked, so a piece drawn on a square the board says is
+    # empty is caught as surely as one missing from a square it says is not.
+    drawn = piece_kinds(g)
+    engine = {}
+    for sq in range(32):
+        m = 1 << sq
+        v = 0 if blk & m else 1 if wht & m else None
+        if v is not None:
+            engine[(sq_row(sq), sq_col(sq))] = v
+    wrong = sorted(k for k in set(drawn) | set(engine)
+                   if drawn.get(k) != engine.get(k))
+    check(not wrong, "what is drawn is the board, square for square (%d pieces "
+                     "drawn, %d on the board, %r wrong)"
+          % (len(drawn), len(engine), wrong[:4]))
+
+
+def p4_mandatory_capture(g):
+    """A side with a capture available is offered only captures - and playing
+    one really takes the piece."""
+    print("P4 mandatory capture")
+    g.start()
+    if not g.need("board", "side", "cursor", "sel", "state", "n_moves", "moves"):
+        return
+    a = g.addr["board"]
+
+    # Park the cursor on square 9 first, from the start position, so the board
+    # write below does not also have to move it.
+    g.run(150, "D")
+    g.run(14)
+    check(g.var("cursor") == 9, "the cursor is parked on square 9 (%d)"
+          % g.var("cursor"))
+
+    # A black man on 9 with a jump over each of 13 and 14 - and a black man on
+    # 0 that has two perfectly good QUIET moves (0 -SW-> 4, 0 -SE-> 5) and no
+    # capture at all.  That second man is the point: with a bare single-man
+    # board "every legal move is a capture" would hold even with no
+    # mandatory-capture rule anywhere, because there would be no quiet move to
+    # offer.  The quiet moves existing and still not being offered is the rule.
+    blk, wht = (1 << 9) | (1 << 0), (1 << 13) | (1 << 14)
+    g.p.memory[a:a + 12] = board_bytes(blk, wht, 0)
+    g.p.memory[g.addr["side"]:g.addr["side"] + 1] = bytes([SIDE_BLACK])
+    g.run(20)                     # a couple of game iterations, so the screen
+                                  # has redrawn from the written board too
+    ms = legal_moves(g)
+    check(len(ms) == 2, "the legal set is 9's two jumps (%r)" % (ms,))
+    check(all(m["capture"] != NO_SQ for m in ms),
+          "every move in it is a capture - the man on 0's two quiet moves are "
+          "not offered at all (%r)" % (ms,))
+    check(all(m["from"] == 9 for m in ms),
+          "and every one of them is played by the man on 9 (%r)"
+          % (sorted({m["from"] for m in ms}),))
+    check(sorted(m["to"] for m in ms) == [16, 18],
+          "landing on 16 (over 13) and 18 (over 14) (%r)"
+          % (sorted(m["to"] for m in ms),))
+    check(piece_kinds(g) == {(0, 1): 0, (2, 3): 0, (3, 2): 1, (3, 4): 1},
+          "the screen followed the board write - black men on sq 0 and 9, "
+          "white on sq 13 and 14 (%r)" % (sorted(piece_kinds(g).items()),))
+    check(g.var("n_moves") == 2, "and main.c's own move list agrees (%d)"
+          % g.var("n_moves"))
+
+    tap(g, "A")
+    check(g.var("sel") == 9 and g.var("state") == ST_TARGET,
+          "A picks the man on 9 up (%d, state %d)"
+          % (g.var("sel"), g.var("state")))
+    hl = hl_cells(g)
+    check(hl == [(4, 1), (4, 5)],
+          "the two landing squares light up - sq 16 and sq 18, behind the men "
+          "they take (%r)" % (hl,))
+
+    g.run(30, "D")                # DOWN is main.c's DIR_SE: 9 -SE-> 14 -SE-> 18
+    g.run(14)
+    check(g.var("cursor") == 18,
+          "DOWN steps over the man on 14 and lands the cursor on 18 (%d)"
+          % g.var("cursor"))
+
+    tap(g, "A")
+    blk, wht, kng = board_masks(g)
+    check(not (blk & (1 << 9)) and bool(blk & (1 << 18)),
+          "the man landed on 18 (black 0x%08X)" % blk)
+    check(bool(blk & (1 << 0)), "and the man on 0, which never moved, is still "
+                                "there (black 0x%08X)" % blk)
+    check(not (wht & (1 << 14)), "the jumped man on 14 is gone (white 0x%08X)"
+          % wht)
+    check(bool(wht & (1 << 13)), "the man on 13, which this jump did not take, "
+                                 "is still there (white 0x%08X)" % wht)
+    check(g.var("side") == SIDE_WHITE,
+          "the turn passed to white (side %d)" % g.var("side"))
+    check(cell_kind(g, 4, 5) == 0, "the tilemap shows the black man on cell(4, 5) "
+                                   "(%r)" % (cell_kind(g, 4, 5),))
+    check(g.cell_is(3, 4, T_DARK),
+          "and cell(3, 4), where the taken man stood, is bare board (%r)"
+          % ([g.tile(x, y) for x, y in cells(3, 4)],))
+
+
 CHECKS = [("p1_boot_title_board", p1_boot_title_board),
           ("p2_start_position", p2_start_position),
-          ("p3_select_and_highlight", p3_select_and_highlight)]
+          ("p3_select_and_highlight", p3_select_and_highlight),
+          ("p4_move_applied", p4_move_applied),
+          ("p4_mandatory_capture", p4_mandatory_capture)]
 
 
 def main(rom, mapfile):
