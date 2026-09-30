@@ -544,13 +544,34 @@ static void draw_highlights(void)
     }
 }
 
+/* OAM coordinates are not screen coordinates: the DMG draws an 8x8 sprite
+ * with its TOP-LEFT at (OAM_x - 8, OAM_y - 16), and move_sprite() writes OAM
+ * raw.  So both offsets go in here, or the ring lands one square up-left of
+ * the square it is on - and entirely off-screen (or hidden at OAM y = 0) on
+ * the left column and in row 0.  Measured in PyBoy: OAM (48, 32) for
+ * cell(2, 3) renders at (40, 16).  Parked at (0, 0), the hidden position. */
+static void put_ring(uint8_t spr, uint8_t sq)
+{
+    if (sq == NO_SQ) {
+        move_sprite(spr, 0, 0);
+        return;
+    }
+    move_sprite(spr, (uint8_t)(16u * SQ_COL(sq) + 12u),
+                     (uint8_t)(16u * SQ_ROW(sq) + 20u));
+}
+
 /* Follows the selection, so it is repositioned every frame like everything
  * else on the screen - the sprite is the one piece of the screen not made of
- * tiles, and a cursor that lags the thing it points at is worse than none. */
+ * tiles, and a cursor that lags the thing it points at is worse than none.
+ * Two rings: SPR_CURSOR at `cursor`, and - in ST_TARGET only - SPR_SEL over
+ * the picked-up piece itself.  seat_cursor() puts the cursor on a landing
+ * square the moment a piece is picked up, and the highlights show all of
+ * them, so without its own ring the piece that will move is the one thing
+ * on the board with no mark on it. */
 static void move_cursor(void)
 {
-    move_sprite(SPR_CURSOR, (uint8_t)(16u * SQ_COL(cursor)),
-                            (uint8_t)(16u * SQ_ROW(cursor)));
+    put_ring(SPR_CURSOR, cursor);
+    put_ring(SPR_SEL, state == ST_TARGET ? sel : (uint8_t)NO_SQ);
 }
 
 static void new_game(void)
@@ -572,12 +593,15 @@ void main(void)
      * little array rather than a slice of the BG bank. */
     set_bkg_data(0, GFX_TILE_COUNT, gfx_tiles);
     set_sprite_data(0, GFX_SPRITE_COUNT, gfx_sprites);
+    set_sprite_tile(SPR_CURSOR, 0);
+    set_sprite_tile(SPR_SEL, 0);    /* both rings are the one ring tile */
+    put_ring(SPR_CURSOR, NO_SQ);    /* parked at OAM (0, 0) = hidden */
+    put_ring(SPR_SEL, NO_SQ);
     BGP_REG  = 0xE4;                /* 3 2 1 0, darkest to lightest */
     OBP0_REG = 0xE4;
     SPRITES_8x8;
     SHOW_BKG;
-    SHOW_SPRITES;                   /* nothing positioned yet: the cursor
-                                     * sprite sits at OAM (0, 0) - off-screen -
+    SHOW_SPRITES;                   /* nothing marked yet: both rings parked
                                      * until START enters ST_SELECT */
     DISPLAY_ON;
 
@@ -641,10 +665,10 @@ void main(void)
             }
             build_hud();
         }
-        /* The sprite is two OAM bytes and is written every frame whatever the
-         * tilemap is doing, so a write the PPU drops mid-scanline is corrected
-         * on the next one rather than leaving the cursor behind.  Not on the
-         * title screen, where there is no cursor to place. */
+        /* The rings are four OAM bytes and are written every frame whatever
+         * the tilemap is doing, so a write the PPU drops mid-scanline is
+         * corrected on the next one rather than leaving a ring behind.  Not
+         * on the title screen, where there is nothing to mark. */
         if (state != ST_TITLE) move_cursor();
 
         /* One wait per iteration, whether or not anything was drawn: `frame`

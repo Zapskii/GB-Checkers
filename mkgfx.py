@@ -152,9 +152,12 @@ NAMES.append(("T_LETTER0", 30))
 # ------------------------------------------------------------- sprite data
 # OBJ tiles are a VRAM bank of their own, so sprite tile 0 has nothing to do
 # with BG tile 0 and this is a separate array.  Colour 0 is transparent on a
-# sprite, so '.' here is a hole rather than a colour.  SPRITES_8x8: one tile,
-# one cursor, moved to (16*col, 16*row).  Parked at (0, 0) = hidden until a
-# later phase has something to point at.
+# sprite, so '.' here is a hole rather than a colour.  SPRITES_8x8: one ring
+# tile, TWO OAM slots sharing it - SPR_CURSOR where the cursor rests, SPR_SEL
+# marking the picked-up piece while one is up.  OAM coordinates are not
+# screen ones: the DMG draws an 8x8 sprite 8 px left of and 16 px above the
+# position written, so the placing lives in main.c and adds both offsets.
+# Parked at (0, 0) = hidden until something is to be marked.
 CURSOR = ["########",
           "#......#",
           "#......#",
@@ -192,10 +195,14 @@ lines += [
     " * {man, king}; quadrant (dx, dy) of a 2x2-tile cell. */",
     "#define T_PIECE(kind, dx, dy) (T_PIECE0 + 4 * (kind) + 2 * (dy) + (dx))",
     "",
-    "/* The one 8x8 cursor sprite, loaded at OBJ tile 0 (a bank of its own),",
-    " * parked at (16 * col, 16 * row) by the phase that moves it. */",
+    "/* Two OAM slots share the one 8x8 ring tile: SPR_CURSOR is the cursor,",
+    " * SPR_SEL marks the picked-up piece in ST_TARGET.  OAM is not screen",
+    " * coordinates - the DMG draws a sprite at (x-8, y-16) of what is written",
+    " * - so the placing lives in main.c and adds both offsets.  Parked at",
+    " * (0, 0) = hidden. */",
     "#define GFX_SPRITE_COUNT %d" % len(SPRITES),
     "#define SPR_CURSOR 0",
+    "#define SPR_SEL 1",
     "",
     "static const uint8_t gfx_tiles[] = {",
 ]

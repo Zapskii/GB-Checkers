@@ -112,14 +112,20 @@ class Game:
         return self.p.memory[MAP0 + y * MAP_W + x]
 
     def cursor_box(self):
-        """The cursor sprite's 8x8 px box on the screen, or None when it is
-        parked.  OAM y = 0 is the DMG's "hide this sprite" position, which is
-        where it boots (P1 relies on it) and where a y >= 144 or x >= 168
-        parks it too."""
+        """The cursor sprite's 8x8 px box ON SCREEN, or None when it is parked.
+
+        OAM coordinates are not screen coordinates: the DMG draws a sprite
+        with its top-left at (OAM_x - 8, OAM_y - 16).  Measured off an
+        otherwise-empty board here: the ring at OAM (48, 32) renders
+        x 40..47, y 16..23 - one square up-left of where this box used to
+        claim, which is how main.c's missing +8/+16 shipped a whole phase
+        with the cursor on the wrong square.  OAM y = 0 is the DMG's "hide
+        this sprite" position, where a parked ring sits; x = 0 or x >= 169,
+        y >= 160 slide it off the screen."""
         y, x = self.p.memory[OAM], self.p.memory[OAM + 1]
-        if y == 0 or y >= 144 or x >= 168:
+        if y == 0 or y >= 160 or x == 0 or x >= 169:
             return None
-        return (x, y, x + 8, y + 8)
+        return (x - 8, y - 16, x, y - 8)
 
     def cursor_xy(self):
         """The cursor sprite's OAM (x, y) -- the raw bytes, in x-then-y order
@@ -290,6 +296,16 @@ def sq_col(sq):
     return ((sq & 3) << 1) + (((sq >> 2) & 1) ^ 1)
 
 
+def ring_oam(sq):
+    """OAM (x, y) of an 8x8 ring centred on square sq's cell.
+
+    The cell's top-left corner is (16*col, 16*row); OAM is not screen
+    coordinates - the DMG draws a sprite at (x-8, y-16) of the position
+    written (see Game.cursor_box) - and +2/+2 puts the 8x8 in the middle of
+    the 2x2-tile cell, so OAM = corner + (12, 20)."""
+    return (16 * sq_col(sq) + 12, 16 * sq_row(sq) + 20)
+
+
 def board_bytes(black, white, kings):
     return b"".join(w.to_bytes(4, "little") for w in (black, white, kings))
 
@@ -356,10 +372,10 @@ def p2_start_position(g):
     # (5, 5) of the cell, so the rendered screen tells a disc from the crt0
     # font glyph that would otherwise sit behind the same id.
     #
-    # From P3 the cursor sprite is drawn over the top-left 8x8 of the cell it
-    # sits on, so that one corner pixel is the sprite's and not the art's.
-    # p3_select_and_highlight owns the cursor; this check owns the art, so it
-    # reads the body only on that cell.
+    # From P3 the cursor ring is centred over the cell it sits on, with a
+    # transparent interior, so the disc body under it is still the art's --
+    # cursor_box() hands every check the sprite's real on-screen box either
+    # way, and the masking below runs on that.
     box = g.cursor_box()
     bad = []
     for (r, c), kind in sorted(kinds.items()):
@@ -569,14 +585,17 @@ def p3_select_and_highlight(g):
           "the cursor starts on a square that can move (%d, movable %r)"
           % (c0, movable))
     x, y = g.cursor_xy()
-    check((x, y) == (16 * sq_col(c0), 16 * sq_row(c0)),
-          "the cursor sprite is on square %d = cell(%d, %d) (%r)"
-          % (c0, sq_row(c0), sq_col(c0), (x, y)))
+    check((x, y) == ring_oam(c0),
+          "the cursor's OAM is ring_oam(square %d) = cell(%d, %d) + (12, 20) -- "
+          "OAM is not screen coords; the DMG draws at (x-8, y-16), so the raw "
+          "corner reading means the ring was one square up-left (%r, want %r)"
+          % (c0, sq_row(c0), sq_col(c0), (x, y), ring_oam(c0)))
     check(g.cursor_box() is not None,
-          "and it is really drawn - a sprite at OAM y=0 would be hidden (%r)"
-          % (g.cursor_box(),))
-    check(0 <= x <= 127 and 0 <= y <= 127,
-          "its OAM x/y are inside 0..127 (%r)" % ((x, y),))
+          "and its rendered box is really on the screen - parked is OAM (0, 0) "
+          "(%r)" % (g.cursor_box(),))
+    check(8 <= x <= 168 and 16 <= y <= 159,
+          "its rendered box lies inside the screen, so a cursor on any cell - "
+          "row 0's and column 0's included - is actually drawn (%r)" % ((x, y),))
     check(g.p.memory[OAM + 2] == 0, "sprite tile 0 is the cursor (%d)"
           % g.p.memory[OAM + 2])
     check(g.var("sel") == NO_SQ,
@@ -634,7 +653,7 @@ def p3_select_and_highlight(g):
     check(g.var("cursor") == 13,
           "DOWN from the start square steps onto bare board, square 13 (%d)"
           % g.var("cursor"))
-    check(g.cursor_xy() == (16 * sq_col(13), 16 * sq_row(13)),
+    check(g.cursor_xy() == ring_oam(13),
           "and the sprite followed it to cell(3, 2) (%r)" % (g.cursor_xy(),))
     step(g, "U")
     check(g.var("cursor") == 8,
@@ -708,8 +727,7 @@ def p3_select_and_highlight(g):
     check(g.var("cursor") in (13, 14),
           "and the cursor stays where the pickup seated it - on a landing "
           "square, not back on the piece (%d)" % g.var("cursor"))
-    check(g.cursor_xy() == (16 * sq_col(g.var("cursor")),
-                            16 * sq_row(g.var("cursor"))),
+    check(g.cursor_xy() == ring_oam(g.var("cursor")),
           "with the sprite still under it (%r)" % (g.cursor_xy(),))
 
     # --- mandatory capture: a piece to move is not a piece to pick --------
@@ -770,7 +788,7 @@ def p3_select_and_highlight(g):
     first = g.var("cursor")
     check(first in (16, 18),
           "picking the man up seats the cursor on a landing square (%d)" % first)
-    check(g.cursor_xy() == (16 * sq_col(first), 16 * sq_row(first)),
+    check(g.cursor_xy() == ring_oam(first),
           "and the sprite has followed it off the piece (%r)" % (g.cursor_xy(),))
     step(g, "R")                # RIGHT is DIR_NE - and the cycle ignores it
     other = 18 if first == 16 else 16
@@ -781,9 +799,15 @@ def p3_select_and_highlight(g):
     check(g.var("cursor") in (16, 18),
           "and holding cycles round the landing squares rather than off the "
           "list (%d)" % g.var("cursor"))
-    check(g.visible_sprites() == [0],
-          "there is exactly one sprite on the screen, the cursor (%r)"
+    check(g.visible_sprites() == [0, 1],
+          "the screen holds two rings: the cursor on the landing square, and "
+          "second slot marking the picked-up piece (%r)"
           % (g.visible_sprites(),))
+    sy, sx = g.p.memory[OAM + 4], g.p.memory[OAM + 5]
+    check((sx, sy) == ring_oam(9),
+          "and the second ring really marks the piece itself - OAM of square "
+          "9's cell, with nothing over the piece it just left (%r, want %r)"
+          % ((sx, sy), ring_oam(9)))
 
 
 # ---------------------------------------------------------------- P4 --------
@@ -859,8 +883,8 @@ def p4_move_applied(g):
     check(g.var("cursor") == 13,
           "one press cycles it to the other landing square, 13 (%d)"
           % g.var("cursor"))
-    check(g.cursor_xy() == (16 * sq_col(13), 16 * sq_row(13)),
-          "and the sprite followed it to cell(3, 2) = OAM (32, 48) (%r)"
+    check(g.cursor_xy() == ring_oam(13),
+          "and the sprite followed it to cell(3, 2) = OAM (44, 68) (%r)"
           % (g.cursor_xy(),))
 
     tap(g, "A")

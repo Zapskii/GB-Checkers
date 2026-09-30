@@ -18,10 +18,14 @@
  * {man, king}; quadrant (dx, dy) of a 2x2-tile cell. */
 #define T_PIECE(kind, dx, dy) (T_PIECE0 + 4 * (kind) + 2 * (dy) + (dx))
 
-/* The one 8x8 cursor sprite, loaded at OBJ tile 0 (a bank of its own),
- * parked at (16 * col, 16 * row) by the phase that moves it. */
+/* Two OAM slots share the one 8x8 ring tile: SPR_CURSOR is the cursor,
+ * SPR_SEL marks the picked-up piece in ST_TARGET.  OAM is not screen
+ * coordinates - the DMG draws a sprite at (x-8, y-16) of what is written
+ * - so the placing lives in main.c and adds both offsets.  Parked at
+ * (0, 0) = hidden. */
 #define GFX_SPRITE_COUNT 1
 #define SPR_CURSOR 0
+#define SPR_SEL 1
 
 static const uint8_t gfx_tiles[] = {
     0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,  /* 0 */
