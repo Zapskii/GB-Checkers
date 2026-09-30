@@ -18,8 +18,8 @@ There is no AI opponent yet - both players share the Game Boy (Milestone 2).
 | Button | What it does |
 |--------|--------------|
 | START  | new game - from the title screen, and from a finished game |
-| d-pad  | move the cursor. It walks square to square along the diagonals and only comes to rest on a square you can actually use (hold to repeat) |
-| A      | pick up the piece under the cursor; press again on a highlighted square to play the move |
+| d-pad  | move the cursor. Before a piece is picked up it walks square to square along the diagonals, resting only on squares you can actually use. Once a piece is up it cycles that piece's landing squares, one per press (hold to repeat) |
+| A      | pick up the piece under the cursor; press again to play the move. Picking up *seats* the cursor on a landing square, so the second press always has somewhere to go |
 | B      | put a picked-up piece back down; on a finished game, new game |
 
 The d-pad is rotated 45 degrees: **UP** and **RIGHT** both go up the screen,
@@ -36,6 +36,15 @@ available, a piece that has no capture has no legal move at all and the cursor
 will not settle on it. Bare board *is* a landing square, though, because the
 four men that can move at the start sit one row apart in a straight line, and a
 cursor that could rest only on pieces could never get from one to the next.
+
+Once a piece is picked up, though, walking it is not a good way to choose where
+it goes: a piece's landing squares are usually *not* neighbours of each other
+(the man on 9 can go to 13 or 14, and 13's only neighbours are 5 and 17), so
+"walk that way" has no path between them and a press between them is dead. So a
+pickup seats the cursor on the first landing square, and each d-pad press then
+moves it to the next one and wraps - which key you press makes no difference.
+Two presses of A, picking up and playing, always move a piece.
+
 Mid-chain there is nothing to put back - the capture is already on the board -
 so B does nothing until the chain ends.
 

@@ -504,6 +504,24 @@ def step(g, key):
     g.run(16)           # the tilemap trails main.c's statics by an iteration
 
 
+def cycle_to(g, sq, limit=8):
+    """With a piece picked up, press until the cursor is on the landing square
+    `sq`.
+
+    Picking a piece up SEATS the cursor on one of its landing squares, and the
+    d-pad then cycles a press at a time, wrapping - which key it is does not
+    matter, since a piece's landing squares are not neighbours of each other
+    and so "walk that way" has no meaning between them.  So a check that wants
+    the OTHER landing square presses; it does not walk.  Bounded, and it
+    returns whether it got there, so a stuck cursor reads as a FAILED CHECK
+    rather than a hang."""
+    for _ in range(limit):
+        if g.var("cursor") == sq:
+            return True
+        step(g, "D")
+    return g.var("cursor") == sq
+
+
 def tap_at_notch(g, key, tap=6):
     """A person's tap - 6 frames, ~100 ms - aimed at the one place the buggy
     repeat rule fired.
@@ -687,9 +705,12 @@ def p3_select_and_highlight(g):
           "B drops the piece (%#x, state %d)"
           % (g.var("sel"), g.var("state")))
     check(hl_cells(g) == [], "0 highlights after B (%r)" % (hl_cells(g),))
-    check(g.var("cursor") == 9 and g.cursor_xy() == (16 * sq_col(9), 16 * sq_row(9)),
-          "the cursor never left the piece it was on - square 9 (%r)"
-          % (g.cursor_xy(),))
+    check(g.var("cursor") in (13, 14),
+          "and the cursor stays where the pickup seated it - on a landing "
+          "square, not back on the piece (%d)" % g.var("cursor"))
+    check(g.cursor_xy() == (16 * sq_col(g.var("cursor")),
+                            16 * sq_row(g.var("cursor"))),
+          "with the sprite still under it (%r)" % (g.cursor_xy(),))
 
     # --- mandatory capture: a piece to move is not a piece to pick --------
     print("P3 selectable means legal, not mine")
@@ -707,11 +728,15 @@ def p3_select_and_highlight(g):
     check(piece_kinds(g) == {(0, 1): 0, (2, 3): 0, (3, 2): 1, (3, 4): 1},
           "the screen followed the board write - black men on sq 0 and 9, "
           "white on sq 13 and 14 (%r)" % (sorted(piece_kinds(g).items()),))
-    # The walk may rest on bare board, but never on a piece it cannot use.  UP
-    # from 9 is DIR_NW and lands on 5, which is empty; UP again is 0, the black
-    # man who must not be pickable, so he is stepped over and - the board
-    # ending there - the cursor holds on 5.  A on 5, an empty square, then
-    # picks up nothing, and only then is the cursor put back on 9.
+    # The walk may rest on bare board, but never on a piece it cannot use.  It
+    # starts from 9, so put the cursor there: the drop above left it on the
+    # landing square the pickup seated it on, which is the new behaviour and
+    # not what this check is about.  UP from 9 is DIR_NW and lands on 5, which
+    # is empty; UP again is 0, the black man who must not be pickable, so he is
+    # stepped over and - the board ending there - the cursor holds on 5.  A on
+    # 5, an empty square, then picks up nothing, and only then is the cursor
+    # put back on 9.
+    set_cursor(g, 9)
     g.run(150, "U")
     check(g.var("cursor") == 5,
           "UP from 9 lands on the empty square 5 (%d)" % g.var("cursor"))
@@ -734,6 +759,28 @@ def p3_select_and_highlight(g):
           "jumped men (%r)" % (hl,))
     check(sorted((sq_row(m["to"]), sq_col(m["to"])) for m in legal_moves(g))
           == hl, "... and they are the move list's m.to again")
+
+    # Picking it up SEATS the cursor on a landing square, so that the next A
+    # always has something to do.  It used to stay on the piece, and the player
+    # had to walk it to a destination - which is a dead press whenever the walk
+    # ends on nothing, and it usually does: a piece's landing squares are not
+    # neighbours of each other.  That silence is exactly what "A does nothing"
+    # looked like from the sofa.  The d-pad then cycles, one landing square a
+    # press, and which key it is does not matter.
+    first = g.var("cursor")
+    check(first in (16, 18),
+          "picking the man up seats the cursor on a landing square (%d)" % first)
+    check(g.cursor_xy() == (16 * sq_col(first), 16 * sq_row(first)),
+          "and the sprite has followed it off the piece (%r)" % (g.cursor_xy(),))
+    step(g, "R")                # RIGHT is DIR_NE - and the cycle ignores it
+    other = 18 if first == 16 else 16
+    check(g.var("cursor") == other,
+          "one press moves it to the other landing square, %d, whichever key "
+          "was pressed (%d)" % (other, g.var("cursor")))
+    g.run(90, "D")              # the repeat takes the same path
+    check(g.var("cursor") in (16, 18),
+          "and holding cycles round the landing squares rather than off the "
+          "list (%d)" % g.var("cursor"))
     check(g.visible_sprites() == [0],
           "there is exactly one sprite on the screen, the cursor (%r)"
           % (g.visible_sprites(),))
@@ -800,10 +847,18 @@ def p4_move_applied(g):
           "A picks square 9 up (%d, state %d)" % (g.var("sel"), g.var("state")))
 
     # 9's legal moves are to 13 and 14 (NEIGH[9] = {5, 6, 13, 14} for NW NE SW
-    # SE), so LEFT - main.c's DIR_SW - lands on 13 in one hop.
-    step(g, "L")
+    # SE).  The pickup ALREADY seated the cursor on one of them - that is the
+    # point of the seat - so a press moves it to the OTHER one, and which key
+    # was pressed does not matter: "walk that way" has no meaning between two
+    # squares that are not neighbours.  cycle_to() aims at a particular one.
+    first = g.var("cursor")
+    check(first in (13, 14),
+          "the pickup seated the cursor on one of the two landing squares (%d)"
+          % first)
+    cycle_to(g, 13)
     check(g.var("cursor") == 13,
-          "LEFT walks the cursor from 9 onto square 13 (%d)" % g.var("cursor"))
+          "one press cycles it to the other landing square, 13 (%d)"
+          % g.var("cursor"))
     check(g.cursor_xy() == (16 * sq_col(13), 16 * sq_row(13)),
           "and the sprite followed it to cell(3, 2) = OAM (32, 48) (%r)"
           % (g.cursor_xy(),))
@@ -919,10 +974,11 @@ def p4_mandatory_capture(g):
           "the two landing squares light up - sq 16 and sq 18, behind the men "
           "they take (%r)" % (hl,))
 
-    step(g, "D")                # DOWN is main.c's DIR_SE: 9 -SE-> 14 -SE-> 18
-    check(g.var("cursor") == 18,
-          "DOWN steps over the man on 14 and lands the cursor on 18 (%d)"
-          % g.var("cursor"))
+    # A puts it on a landing square, and the jumps are not neighbours of the
+    # piece or of each other, so the other one is a press away, not a walk.
+    check(cycle_to(g, 18),
+          "a press per landing square reaches 18, the jump that takes the man "
+          "on 14 (%d)" % g.var("cursor"))
 
     tap(g, "A")
     blk, wht, kng = board_masks(g)
@@ -983,9 +1039,7 @@ def p5_chain_continues(g):
     check(hl_cells(g) == [(5, 4)], "its landing square, 22, lights up (%r)"
           % (hl_cells(g),))
 
-    step(g, "D")                # DOWN is DIR_SE: 13 -SE-> 17 -SE-> 22
-    check(g.var("cursor") == 22,
-          "DOWN steps over the man on 17 and lands the cursor on 22 (%d)"
+    check(cycle_to(g, 22), "and the cursor is on 22, its landing square (%d)"
           % g.var("cursor"))
     tap(g, "A")
 
@@ -1020,8 +1074,8 @@ def p5_chain_continues(g):
     check(hl_cells(g) == [(7, 2)],
           "exactly one square is lit - its landing square, 29 (%r)"
           % (hl_cells(g),))
-    check(g.var("cursor") == 22,
-          "and the cursor is on the piece, ready for the next hop (%d)"
+    check(g.var("cursor") == 29,
+          "and the cursor is already on the chain's next landing square, 29 (%d)"
           % g.var("cursor"))
     check(hud_word(g) == "BLACK", "the HUD still says BLACK (%r)" % hud_word(g))
     check(cell_kind(g, 5, 4) == 0,
@@ -1032,10 +1086,8 @@ def p5_chain_continues(g):
           % ([g.tile(x, y) for x, y in cells(4, 3)],))
 
     # --- hop two ---------------------------------------------------------
-    step(g, "L")                # LEFT is DIR_SW: 22 -SW-> 25 -SW-> 29
-    check(g.var("cursor") == 29,
-          "LEFT steps over the man on 25 and lands the cursor on 29 (%d)"
-          % g.var("cursor"))
+    # The chain hop landed the piece on 22 and SEATED the cursor on the next
+    # hop's landing square, 29 - the same piece, still up, no press needed.
     tap(g, "A")
 
     blk, wht, kng = board_masks(g)
@@ -1087,9 +1139,7 @@ def p5_promotion_stops_chain(g):
     check(hl_cells(g) == [(7, 4)], "its landing square, 30, lights up (%r)"
           % (hl_cells(g),))
 
-    step(g, "D")                # DOWN is DIR_SE: 21 -SE-> 25 -SE-> 30
-    check(g.var("cursor") == 30,
-          "DOWN steps over the man on 25 and lands the cursor on 30 (%d)"
+    check(cycle_to(g, 30), "and the cursor is on 30, its landing square (%d)"
           % g.var("cursor"))
     tap(g, "A")
 
@@ -1149,10 +1199,10 @@ def p6_setup_stuck(g):
 
 
 def p6_play_it_out(g):
-    """Play 0 -> 4: A to pick the man on 0 up, LEFT (main.c's DIR_SW) to walk
-    the cursor onto its landing square, A to move it."""
+    """Play 0 -> 4: A to pick the man on 0 up, which seats the cursor on 4, the
+    only landing square it has, then A to move it."""
     tap(g, "A")
-    step(g, "L")
+    check(cycle_to(g, 4), "A on 0 seats the cursor on 4 (%d)" % g.var("cursor"))
     tap(g, "A")
 
 

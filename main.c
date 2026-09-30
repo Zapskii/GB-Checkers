@@ -124,37 +124,39 @@ static void compute_legal(void)
 }
 
 /* Where the cursor may come to rest, and *not* "is this a square holding one of
- * my men".  With nothing picked up that is a piece that can legally move: under
- * mandatory capture a piece of the side to move that cannot capture has no moves
- * at all, so it must not be pickable either.  With a piece picked up it is one
- * of that piece's destinations.  Both are membership of the move list the screen
- * is drawing from, which is what keeps the two in step. */
+ * my men".  It is a piece that can legally move: under mandatory capture a piece
+ * of the side to move that cannot capture has no moves at all, so it must not be
+ * pickable either.  That is membership of the move list the screen is drawing
+ * from, which is what keeps the two in step.
+ *
+ * ST_SELECT only: this is the walk's question.  With a piece up there is no
+ * walking (see cycle_target), and the only squares in play are the destinations
+ * the list itself holds. */
 static uint8_t landable(uint8_t sq)
 {
     uint8_t i;
     for (i = 0; i < n_moves; i++) {
-        if ((state == ST_TARGET ? moves[i].to : moves[i].from) == sq) return 1;
+        if (moves[i].from == sq) return 1;
     }
     return 0;
 }
 
-/* One d-pad step: hop along NEIGH in `dir`, landing on the first square that is
- * EMPTY or that is in the current move list, at most WALK_STEPS hops.  Squares
- * that are neither are stepped *over*; running out of board or of steps leaves
- * the cursor where it was.
+/* One d-pad step with nothing picked up: hop along NEIGH in `dir`, landing on
+ * the first square that is EMPTY or that is in the current move list, at most
+ * WALK_STEPS hops.  Squares that are neither are stepped *over*; running out of
+ * board or of steps leaves the cursor where it was.
  *
  * Empty squares are landable, and that is not a nicety - without it the game is
- * unplayable.  The move list holds only the side's movable MEN (in ST_SELECT)
- * or one piece's destinations (in ST_TARGET), and a walk may only travel along
- * a single diagonal.  The four movable men at the start position sit on squares
- * 8, 9, 10 and 11 - one row, two columns apart - so no straight diagonal line
- * joins any two of them, and a cursor that could land only on the move list
- * was trapped on whichever man it first reached: pick one piece or pick none.
- * Letting it rest on bare board makes the whole board navigable while keeping
- * the property that matters - it can never come to rest on a piece it cannot
- * use, because those are occupied and not in the move list, so they are stepped
- * over.  Two hops is what a capture needs (over the taken piece and onto the
- * square behind it); four leaves room to spare. */
+ * unplayable.  The move list holds only the side's movable MEN, and a walk may
+ * only travel along a single diagonal.  The four movable men at the start
+ * position sit on squares 8, 9, 10 and 11 - one row, two columns apart - so no
+ * straight diagonal line joins any two of them, and a cursor that could land
+ * only on the move list was trapped on whichever man it first reached: pick one
+ * piece or pick none.  Letting it rest on bare board makes the whole board
+ * navigable while keeping the property that matters - it can never come to rest
+ * on a piece it cannot use, because those are occupied and not in the move list,
+ * so they are stepped over.  Two hops is what a capture needs (over the taken
+ * piece and onto the square behind it); four leaves room to spare. */
 static uint8_t walk(uint8_t from, uint8_t dir)
 {
     uint8_t sq, i;
@@ -172,6 +174,48 @@ static uint8_t walk(uint8_t from, uint8_t dir)
         if (landable(sq) || !sq_occupant(&board, sq)) return sq;
     }
     return from;
+}
+
+/* Where the cursor is put the moment a piece is picked up, and after every hop
+ * of a chain: on a destination, so that A always has something to do.
+ *
+ * It used to stay on the piece, and the player had to walk it to a destination.
+ * That reads as "A does nothing" whenever the walk ends somewhere with nothing
+ * on it - which is easy to do, since a piece's destinations are usually NOT
+ * neighbours of each other (9's are 13 and 14, and 13's only neighbours are 5
+ * and 17), so the walk between them has to pass through a square that is not
+ * one of them and therefore a dead press.  Seating it removes the whole class:
+ * from here every press cycles to a destination and every press of A plays. */
+static void seat_cursor(void)
+{
+    /* Both callers narrow the list to the picked-up piece first - that is what
+     * compute_legal() does with `sel` set - so every entry is a move of that
+     * piece and the first one's destination is a landing square.  Nothing to
+     * search for: the work was already done one call ago.
+     *
+     * Do NOT put a loop back here.  `moves[i].to` after a compare against a
+     * global is miscompiled by this toolchain: SDCC builds &moves[i] in HL, then
+     * reloads HL with #sel for the compare, then emits `inc hl` to reach .to -
+     * which now reads sel + 1.  That byte is `cursor` (declared right after
+     * `sel`), so the store is a no-op and the bug looks exactly like "the
+     * function ran but its write vanished". */
+    if (n_moves) cursor = moves[0].to;
+}
+
+/* A d-pad press with a piece up steps to the next destination, and WHICH key
+ * was pressed does not matter, for the reason above: "walk that way" has no
+ * meaning between squares that are not neighbours.  One press per destination,
+ * wrapping, so every destination is reachable and no press can do nothing. */
+static void cycle_target(void)
+{
+    uint8_t i;
+    for (i = 0; i < n_moves; i++) {
+        if (moves[i].to == cursor) {
+            cursor = moves[i + 1 < n_moves ? (uint8_t)(i + 1) : 0].to;
+            return;
+        }
+    }
+    if (n_moves) cursor = moves[0].to;      /* not on one: seat it */
 }
 
 /* Each d-pad key is one diagonal - the board has no other kind of neighbour, so
@@ -251,6 +295,14 @@ static void play(uint8_t sq)
             sel = m.to;               /* the same piece is still up */
             cursor = m.to;
             state = ST_TARGET;        /* and its next hops are the targets */
+            /* The next hops, and the cursor put on one of them, so the player
+             * is not left on the piece with nothing to press.  The list has to
+             * be recomputed here rather than at the top of the next iteration:
+             * it still holds the moves from BEFORE this hop, and seating the
+             * cursor out of that would put it on a square that is not on offer
+             * - which A would then ignore, the very thing being fixed. */
+            compute_legal();
+            seat_cursor();
         } else {
             chain_sq = NO_SQ;
             sel = NO_SQ;
@@ -301,11 +353,10 @@ static void handle_input(void)
      * eight, and more often once the loop got faster.  Counting from the press
      * makes a tap exactly one step, always. */
     if (dir != NO_SQ) {
-        if (pressed & (J_UP | J_DOWN | J_LEFT | J_RIGHT)) {
-            cursor = walk(cursor, dir);
-            repeat = 0;
-        } else if (++repeat >= REPEAT_DIV) {
-            cursor = walk(cursor, dir);
+        if ((pressed & (J_UP | J_DOWN | J_LEFT | J_RIGHT)) ||
+            ++repeat >= REPEAT_DIV) {
+            if (state == ST_TARGET) cycle_target();   /* pick a destination */
+            else                    cursor = walk(cursor, dir);
             repeat = 0;
         }
     } else {
@@ -321,6 +372,7 @@ static void handle_input(void)
                 sel = cursor;
                 state = ST_TARGET;
                 compute_legal();              /* narrow to this piece */
+                seat_cursor();                /* and stand on a destination */
             }
         } else {
             play(cursor);                     /* A on a destination: move it */
