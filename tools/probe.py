@@ -2236,6 +2236,241 @@ def p14_one_player_default(g):
           % (g.var("mode_1p"), g.find_text("1 PLAYER")))
 
 
+# --------------------------------------------------------------- P16 -------
+# main.c's undo history.  `hist_n` is the symbol this phase adds, so its absence
+# from the linker map is what makes this check answer the power gate with exit 1
+# on the pre-P16 ROM rather than blowing up as a harness error - the same shape
+# as p10's mode_1p and p14's boot default.
+#
+# Every board below is judged against THIS FILE's gen_moves/apply_move, never
+# against sim.h: a check that asks the ROM whether the ROM is right proves
+# nothing, and "the position went back one turn" is exactly the kind of claim
+# where a shared bug would read as a pass.
+def p16_undo(g):
+    """SELECT during play undoes a turn - and a chain undoes as one turn.
+
+    The subtlety the check has to carry is that undo is NOT "pop one snapshot".
+    The snapshot on top is always the CURRENT turn's start, so popping it alone
+    restores the position already on screen.  In 1 PLAYER the walk has to keep
+    dropping past the machine's turn start as well, and in 2 PLAYERS one drop is
+    the whole answer - which is why the two modes get separate assertions here
+    rather than one that happens to hold for both.
+    """
+    print("P16 undo in 1 player")
+    # Booted RAW, like p10: Game.start() forces MODE_2P, and this half of the
+    # check is about the 1-player walk (drop past the machine's turn).
+    g.run(150)
+    if not g.need("mode_1p", "hist", "hist_n", "board", "side", "state", "sel",
+                  "cursor", "chain_sq", "n_moves", "moves"):
+        return
+
+    set_byte(g, "mode_1p", MODE_1P)
+    g.run(20, "S")              # START from the title: a new game
+    g.run(30)
+    check(g.var("state") == ST_SELECT and g.var("side") == SIDE_BLACK,
+          "a 1-player game opens with the human to move (%d, %d)"
+          % (g.var("state"), g.var("side")))
+    check(g.var("hist_n") == 0,
+          "and a new game starts with an empty history (%d)" % g.var("hist_n"))
+
+    # The human's move, played through the UI: pick the man on 9 up, play 9->13.
+    # NOTHING is forced into WRAM here - the whole point is that the history is
+    # built by the live turn loop, so a check that wrote hist_n itself would be
+    # testing its own arithmetic.
+    set_cursor(g, 9)
+    tap(g, "A")
+    check(cycle_to(g, 13), "the human cycles to 13 (%d)" % g.var("cursor"))
+    tap(g, "A")
+    check(await_reply(g),
+          "and the machine replies - black is to move again (%d)" % g.var("side"))
+
+    pre_human = (BLACK_START, WHITE_START, 0)
+    post_reply = board_masks(g)
+    check(post_reply != pre_human,
+          "two turns have been played, so the board has moved on (%s)"
+          % maskstr(post_reply))
+    # One snapshot per turn START, both sides: the human's turn start and the
+    # machine's.  A push that fired per HOP would read higher here; one that
+    # fired per frame would read hundreds.
+    check(g.var("hist_n") == 2,
+          "two turn starts are recorded - the human's and the machine's (%d)"
+          % g.var("hist_n"))
+
+    tap(g, "T")
+    check(board_masks(g) == pre_human,
+          "ONE SELECT press returns the board to before the human's move (%s)"
+          % maskstr(board_masks(g)))
+    check(g.var("side") == SIDE_BLACK,
+          "and it is the human's turn again - the walk dropped past the "
+          "machine's own turn start (%d)" % g.var("side"))
+    check(g.var("hist_n") == 0,
+          "both snapshots were consumed (%d)" % g.var("hist_n"))
+
+    # The no-op at the first turn.  Entering the undo walk with hist_n == 0 is
+    # the case that reads hist[255] - hist_n-- runs BEFORE the hist_n test - and
+    # assigned arbitrary WRAM into the live board.  Asserted by READING THE
+    # BOARD BACK rather than by trusting that nothing was reached: the guard is
+    # what is under test, so the guard is what has to be observed.
+    tap(g, "T")
+    check(board_masks(g) == pre_human,
+          "a further press at the first turn is a no-op - the board is still "
+          "the start position, not whatever WRAM sits past the end of the "
+          "history (%s)" % maskstr(board_masks(g)))
+    check(g.var("side") == SIDE_BLACK and g.var("hist_n") == 0,
+          "and nothing moved: still black to move, history still empty (%d, %d)"
+          % (g.var("side"), g.var("hist_n")))
+
+    # --- two players: ONE drop is the whole answer -------------------------
+    print("P16 undo in 2 players")
+    set_byte(g, "mode_1p", MODE_2P)
+    set_byte(g, "state", ST_TITLE)
+    g.run(30)
+    g.run(20, "S")              # START from the title -> a fresh 2-player game
+    g.run(30)
+    check(g.var("state") == ST_SELECT and g.var("side") == SIDE_BLACK
+          and g.var("hist_n") == 0,
+          "a new 2-player game, empty history (%d, %d, %d)"
+          % (g.var("state"), g.var("side"), g.var("hist_n")))
+
+    m1 = {"from": 9, "to": 13, "capture": NO_SQ}
+    after1 = apply_move(BLACK_START, WHITE_START, 0, m1)
+    set_cursor(g, 9)
+    tap(g, "A")
+    check(cycle_to(g, 13), "black cycles to 13 (%d)" % g.var("cursor"))
+    tap(g, "A")
+    check(g.var("side") == SIDE_WHITE and board_masks(g) == after1,
+          "black played 9 -> 13 - the Python model's own board (%s)"
+          % maskstr(board_masks(g)))
+    check(g.var("hist_n") == 1,
+          "one turn start recorded (%d)" % g.var("hist_n"))
+
+    # White's move comes out of the model, not out of the ROM: the first legal
+    # move white has on that board, driven through the same two-press UI path.
+    wm = gen_moves(*after1, SIDE_WHITE)[0]
+    after2 = apply_move(*after1, wm)
+    set_cursor(g, wm["from"])
+    tap(g, "A")
+    check(cycle_to(g, wm["to"]),
+          "white cycles to %d (%d)" % (wm["to"], g.var("cursor")))
+    tap(g, "A")
+    check(g.var("side") == SIDE_BLACK and board_masks(g) == after2,
+          "white played %d -> %d, per the model (%s)"
+          % (wm["from"], wm["to"], maskstr(board_masks(g))))
+    check(g.var("hist_n") == 2,
+          "two turn starts recorded (%d)" % g.var("hist_n"))
+
+    tap(g, "T")
+    # THE discriminator between the two modes.  Both players being human, the
+    # walk stops after ONE drop, so this lands on WHITE's turn start - the
+    # position after black's move.  A 1-player-style "drop until black" would
+    # sail past it and land on the start position, which is what the assertion
+    # below would then read.
+    check(board_masks(g) == after1,
+          "ONE press returns to the PREVIOUS TURN - white's move undone, white "
+          "to move again (%s)" % maskstr(board_masks(g)))
+    check(g.var("side") == SIDE_WHITE,
+          "and the side to move is white, not black (%d)" % g.var("side"))
+    check(g.var("hist_n") == 1, "one snapshot was consumed (%d)" % g.var("hist_n"))
+    check(g.var("chain_sq") == NO_SQ and g.var("state") == ST_SELECT
+          and g.var("sel") == NO_SQ,
+          "and the UI was recomputed, not restored: no chain open, nothing "
+          "picked up, ST_SELECT (%#x, %d, %#x)"
+          % (g.var("chain_sq"), g.var("state"), g.var("sel")))
+
+    tap(g, "T")
+    check(board_masks(g) == (BLACK_START, WHITE_START, 0)
+          and g.var("side") == SIDE_BLACK and g.var("hist_n") == 0,
+          "and a second press goes back another turn - the start position, "
+          "black to move, history empty (%s, %d, %d)"
+          % (maskstr(board_masks(g)), g.var("side"), g.var("hist_n")))
+
+    # --- a chain rewinds as a UNIT ----------------------------------------
+    print("P16 a chain rewinds as a unit")
+    # Black man on 4, white men on 8, 17 and 25: 4 -SE-> 13 (over 8),
+    # 13 -SE-> 22 (over 17), 22 -SW-> 29 (over 25).  THREE hops, so the press
+    # below can be taken with two of them already played - mid-chain, and with
+    # a hop that must NOT have recorded anything behind it.  NEIGH says so; the
+    # model below says so independently.  (The third hop crowns on 29, which
+    # ends the turn - it is never played here.)
+    set_byte(g, "mode_1p", MODE_2P)
+    set_byte(g, "state", ST_TITLE)
+    g.run(30)
+    g.run(20, "S")
+    g.run(30)
+    b0, w0 = 1 << 4, (1 << 8) | (1 << 17) | (1 << 25)
+    force_position(g, b0, w0, 0, SIDE_BLACK)
+    check(g.var("hist_n") == 0,
+          "the chain position is a fresh turn with an empty history (%d)"
+          % g.var("hist_n"))
+
+    hop1 = {"from": 4, "to": 13, "capture": 8}
+    hop2 = {"from": 13, "to": 22, "capture": 17}
+    check(gen_moves(b0, w0, 0, SIDE_BLACK) == [hop1],
+          "the model's only legal move for black is 4 -> 13 over 8 (%r)"
+          % (gen_moves(b0, w0, 0, SIDE_BLACK),))
+
+    # Park the cursor AGAIN, now that the board is settled.  force_position
+    # parks it too, but it writes between two turns of the main loop, and the
+    # write can land after that iteration has already computed its move list
+    # from the board BEFORE the write - the seating then reads the start
+    # position's first man, 8, and the cursor is no longer NO_SQ so it never
+    # gets corrected.  One frame of that is visible in the move list, which is
+    # what gave it away; re-parking costs two lines and removes the race.
+    set_byte(g, "cursor", NO_SQ)
+    g.run(20)
+    check(g.var("cursor") == 4,
+          "the loop seated the cursor on the only movable man, 4 (%d)"
+          % g.var("cursor"))
+
+    tap(g, "A")
+    check(cycle_to(g, 13), "hop 1: the cursor cycles to 13 (%d)" % g.var("cursor"))
+    tap(g, "A")
+    a1 = apply_move(b0, w0, 0, hop1)
+    check(board_masks(g) == a1,
+          "hop 1 landed the man on 13 and took 8 (%s)" % maskstr(board_masks(g)))
+    check(g.var("chain_sq") == 13 and g.var("side") == SIDE_BLACK,
+          "still black's turn, mid-chain on 13 (%#x, %d)"
+          % (g.var("chain_sq"), g.var("side")))
+    check(g.var("hist_n") == 1,
+          "hop 1 recorded the turn START - the only snapshot the chain will "
+          "leave (%d)" % g.var("hist_n"))
+
+    check(g.var("cursor") == 22,
+          "hop 1 seated the cursor on the chain's next landing square, 22 (%d)"
+          % g.var("cursor"))
+    tap(g, "A")
+    a2 = apply_move(*a1, hop2)
+    check(board_masks(g) == a2,
+          "hop 2 took 17 and landed on 22 (%s)" % maskstr(board_masks(g)))
+    check(g.var("chain_sq") == 22 and g.var("side") == SIDE_BLACK,
+          "and the piece can still capture, so the chain is still in flight "
+          "(%#x, %d)" % (g.var("chain_sq"), g.var("side")))
+    # THE assertion the chain_sq guard in play() is under test for.  Hop 2 was
+    # played with chain_sq already set, so it must have recorded NOTHING: a push
+    # here would make the undo below land on the position after hop 1, one hop
+    # back instead of one TURN back.  Removing the guard leaves this reading 2
+    # and fails the next assertion while every other one in this check passes.
+    check(g.var("hist_n") == 1,
+          "and hop 2 recorded NOTHING - a chain's hops 2..N are not turn starts "
+          "(%d)" % g.var("hist_n"))
+
+    tap(g, "T")
+    check(board_masks(g) == (b0, w0, 0),
+          "ONE SELECT taken MID-CHAIN rewinds the whole chain, to before its "
+          "first hop (%s)" % maskstr(board_masks(g)))
+    check(g.var("side") == SIDE_BLACK and g.var("chain_sq") == NO_SQ,
+          "and the turn is black's again with no chain open (%d, %#x)"
+          % (g.var("side"), g.var("chain_sq")))
+    check(g.var("state") == ST_SELECT and g.var("sel") == NO_SQ,
+          "and nothing is picked up - the state was recomputed, not restored "
+          "(%d, %#x)" % (g.var("state"), g.var("sel")))
+    check(g.var("hist_n") == 0,
+          "the chain's one snapshot was consumed (%d)" % g.var("hist_n"))
+    check(legal_moves(g) == [hop1],
+          "and the board behind it is the pre-chain position, played forward "
+          "again: the same one legal move (%r)" % (legal_moves(g),))
+
+
 CHECKS = [("p1_boot_title_board", p1_boot_title_board),
           ("p2_start_position", p2_start_position),
           ("p3_select_and_highlight", p3_select_and_highlight),
@@ -2250,7 +2485,8 @@ CHECKS = [("p1_boot_title_board", p1_boot_title_board),
           ("p11_think_budget", p11_think_budget),
           ("p12_sfx", p12_sfx),
           ("p13_sgb_border", p13_sgb_border),
-          ("p14_one_player_default", p14_one_player_default)]
+          ("p14_one_player_default", p14_one_player_default),
+          ("p16_undo", p16_undo)]
 
 
 def main(rom, mapfile):

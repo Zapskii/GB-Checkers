@@ -10,7 +10,8 @@ is complete: a full two-player pass-and-play game with title screen, board and
 cursor, mandatory capture, multi-jump chains, promotion, win detection and
 restart. Milestone 2 adds an opponent: the title screen opens on **1 PLAYER**,
 and the machine plays white, the human black, with the moves making their own
-noises. `make` builds the ROM, `make test` runs
+noises. SELECT takes a turn back - see [Undo](#undo). `make` builds the ROM,
+`make test` runs
 the rules engine's unit tests on the host, and `make probe` drives the ROM in a
 headless emulator and asserts on what it did.
 
@@ -18,7 +19,7 @@ headless emulator and asserts on what it did.
 
 | Button | What it does |
 |--------|--------------|
-| SELECT | on the title screen, switch between **1 PLAYER** (the default) and **2 PLAYERS** |
+| SELECT | on the title screen, switch between **1 PLAYER** (the default) and **2 PLAYERS**. During a game, **undo** - take back a turn |
 | START  | new game - from the title screen, and from a finished game |
 | d-pad  | move the cursor. Before a piece is picked up it walks square to square along the diagonals, resting only on squares you can actually use. Once a piece is up it cycles that piece's landing squares, one per press (hold to repeat) |
 | A      | pick up the piece under the cursor; press again to play the move. Picking up *seats* the cursor on a landing square, so the second press always has somewhere to go |
@@ -87,6 +88,19 @@ piece up again.
 
 A game ends when the side to move has no legal move: no pieces left, or every
 piece blocked. The status row says who won and START (or B) starts a new game.
+
+## Undo
+
+SELECT during a game takes a turn back. It goes back to a **turn start** - the
+position and the side about to move - so in 2 players one press undoes the last
+move, and in 1 player one press undoes *your* last move, the machine's reply
+going back with it. A capture chain rewinds whole: press it mid-chain and the
+position before the chain's first hop comes back, not one hop of it. The key
+does nothing before anyone has moved and does nothing on a finished game.
+
+The last 32 turns are kept, in WRAM only - 416 bytes of the 2539 free. That is
+a ceiling rather than a rolling window, so a game that runs past turn 32 keeps
+playing fine, it just stops remembering older turns.
 
 ## Rules implemented
 
@@ -194,8 +208,10 @@ border` writes, via `png2asset -b 1`) and the `-Wl-b_CODE_1=0x4000` area in
 0x4000-0x7FFF and `main.c` hands `set_sgb_border()` plain pointers: no
 `SWITCH_ROM`, no `BANKED`, no MBC. Before P15 those same blobs were linked in
 beside the code in bank 0, which is where the room was running out. Anything
-substantial from here - link cable play, move animation, undo - can take the
-same route.
+substantial from here - link cable play, move animation - can take the same
+route.
+
+Undo did **not** need it: the history is 416 bytes of WRAM, not ROM.
 
 ## How the board is represented
 

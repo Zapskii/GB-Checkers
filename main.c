@@ -21,9 +21,15 @@
  * through - so the chain rule, promotion-stops-the-chain and the end-of-game
  * question have one implementation, not two.
  *
- * Controls: START = new game, SELECT = 2/1 PLAYER (title screen only),
- * d-pad = move the cursor, A = select/play, B = deselect (and, in ST_OVER,
- * also new game).
+ * P16 adds undo, and it is WRAM only: a snapshot of the turn start taken
+ * inside play() - the one choke point both players' moves go through - and a
+ * SELECT handler that walks back down them.  SELECT is free during play (it was
+ * a title-only control), so it takes the key there; no rule changes, and sim.h
+ * is untouched.
+ *
+ * Controls: START = new game, SELECT = 2/1 PLAYER (title screen only) or UNDO
+ * during play, d-pad = move the cursor, A = select/play, B = deselect (and, in
+ * ST_OVER, also new game).
  */
 #include <gb/gb.h>
 #include <gb/sgb.h>
@@ -99,6 +105,27 @@ static uint8_t cursor;    /* the square the cursor sprite sits on */
  * rule input, not a cache: play() sets it from `board` after every hop and
  * nothing else, so it cannot outlive the position it describes. */
 static uint8_t chain_sq;
+
+/* ------------------------------------------------------------------ undo
+ * P16's history: one snapshot per TURN START, and it is `play()` that pushes
+ * them (see the push there for why the guard belongs to it, not here).  A turn
+ * start is a `board` AND the `side` that is about to move it - the turn
+ * boundary flips `side`, so a snapshot that kept only the masks would undo to a
+ * position nobody can move in.
+ *
+ * WRAM ONLY, and small enough to say so out loud: a Board is 12 bytes and `side`
+ * one more, so 32 turns is 416 of the 2539 WRAM bytes `make usage` reports free.
+ * Nothing is restored from a struct copy in one go - board and side go back one
+ * field at a time in undo() - so there is no whole-struct move here for the
+ * toolchain's struct-assignment codegen to get wrong.
+ *
+ * `hist_n` is the COUNT, so hist[0] is the oldest turn start recorded and
+ * hist[hist_n - 1] the newest; undo() reads downwards from the top. */
+#define UNDO_MAX 32u
+typedef struct { Board b; uint8_t side; } Snapshot;
+
+static Snapshot hist[UNDO_MAX];
+static uint8_t  hist_n;
 
 /* The frame's whole tilemap, built then blitted in one write inside VBlank.
  * The HUD is a second, much smaller blit: it is the one thing on the screen
@@ -312,6 +339,50 @@ static void refresh_moves(void)
     compute_legal();
 }
 
+/* Undo: walk back down the snapshot history to a turn start worth returning to,
+ * and recompute everything else from it.  SELECT during play; a no-op in
+ * ST_OVER and ST_TITLE (handle_input() never reaches here from either).
+ *
+ * UNDO IS NOT "POP ONE SNAPSHOT", and that is the whole subtlety.  The snapshot
+ * on top is the CURRENT turn's start - the position already on screen - so
+ * popping it alone changes nothing.  Drop snapshots until the restored one has
+ * the HUMAN to move: in 1 PLAYER that is one further drop past the machine's
+ * turn (the machine's own turn start is pushed like anybody's), and in 2 PLAYERS
+ * the loop runs once, both players being human.  `side != SIDE_BLACK` reads as
+ * "not the human's side" only because the machine is white-only - black is the
+ * human.  If a black machine ever lands, this becomes `side != human_side`.
+ *
+ * MID-CHAIN IT FALLS OUT FOR FREE.  A chain's hops 2..N pushed nothing (see
+ * play()), so the top of the history is the turn the chain STARTED from and
+ * this same walk lands there - one press rewinds a whole chain, not one hop of
+ * it.  Asserted in the probe, not assumed.
+ *
+ * THE GUARD IS LOAD-BEARING.  `hist_n--` runs BEFORE the `hist_n` test, so
+ * entering with hist_n == 0 - a second press at the first turn, or any press
+ * after undoing back to the start - would send hist_n to 0xFF and read
+ * hist[255]: arbitrary WRAM assigned straight into the live board.  Hence the
+ * early return, and hence the probe asserts the no-op by reading the board
+ * afterwards rather than by trusting this function not to have been reached.
+ *
+ * The restored state is RECOMPUTED, not restored.  Nothing about the UI is in
+ * the history: chain_sq/sel are cleared and the state parked by refresh_moves(),
+ * and compute_legal() then re-derives the move list and the turn.  `cursor` is
+ * parked too - the main loop re-seats it on a square this side can use, which is
+ * the same path a new game takes. */
+static void undo(void)
+{
+    if (hist_n == 0) return;      /* nothing recorded: nothing to undo */
+
+    do {
+        hist_n--;
+        board = hist[hist_n].b;
+        side  = hist[hist_n].side;
+    } while (mode_1p && side != SIDE_BLACK && hist_n);
+
+    cursor = NO_SQ;
+    refresh_moves();
+}
+
 /* ------------------------------------------------------------------ sound
  * Three beeps, written where the sound is made.  No audio module for three
  * register sets: the whole of the sound is the writes below.
@@ -409,6 +480,33 @@ static void play(uint8_t from, uint8_t to)
 
         if (m.from != from || m.to != to) continue;
 
+        /* The undo snapshot (P16), and it goes exactly HERE.  Inside the matched
+         * branch, so an A press on a square that is not a move records nothing -
+         * the no-op path above must not leave a bogus turn behind.  One line
+         * before the board moves, so what is recorded is the position this turn
+         * STARTED from, which is what undo has to return to.  `side` goes with
+         * the Board: the else branch below flips it, and a snapshot that kept
+         * only the masks would restore a position with the wrong player to move.
+         *
+         * `chain_sq == NO_SQ` is the whole chain rule, and it is why this push
+         * is in play() rather than in handle_input(): ON ENTRY, a chain_sq that
+         * is not NO_SQ means a capture chain is already in flight, so this call
+         * is hop 2..N of the turn hop 1 opened.  The turn start is already
+         * recorded; recording it again would make one press rewind one hop of a
+         * chain.  That guard is what makes "a chain rewinds as a unit" true, and
+         * the probe pins it by removing the guard and watching the chain case
+         * alone fail.
+         *
+         * ponytail: at UNDO_MAX the history simply stops growing - a 32-turn
+         * ceiling on undo, not a rolling window, because 416 WRAM bytes is what
+         * `make usage` says there is room for without a ring buffer's index
+         * arithmetic.  Revisit only if a game ever needs undo past turn 32. */
+        if (chain_sq == NO_SQ && hist_n < UNDO_MAX) {
+            hist[hist_n].b = board;
+            hist[hist_n].side = side;
+            hist_n++;
+        }
+
         before = board;
         board = apply_move(board, m);
         promoted = move_causes_promotion(&before, m);
@@ -477,6 +575,14 @@ static void handle_input(void)
         if (pressed & (J_START | J_B)) new_game();
         return;
     }
+
+    /* SELECT during play is UNDO.  It was a title-only control until now, so
+     * the key is free here, and the block sits after the ST_OVER return on
+     * purpose: a finished game is frozen and the only thing left to press is a
+     * restart, so undoing one would be un-ending it.  On the machine's turn
+     * handle_input() is not called at all, so SELECT waits out the think with
+     * START and B - which is one blocking call, not a lost press. */
+    if (pressed & J_SELECT) undo();
 
     dir = dir_of(keys);
 
@@ -741,6 +847,11 @@ static void new_game(void)
      * actually use.  Square 0 holds a back-rank man with no legal move, so
      * starting there means the first press of a new game does nothing. */
     cursor = NO_SQ;
+    /* And the undo history starts over with it.  A restart is the title
+     * screen's new game and the ST_OVER one, so clearing it here covers both;
+     * without it a restart would inherit the finished game's turns and one
+     * SELECT could undo straight past the restart. */
+    hist_n = 0;
     refresh_moves();
 }
 
