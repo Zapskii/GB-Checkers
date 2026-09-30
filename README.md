@@ -116,7 +116,9 @@ Nothing automated can see it. PyBoy emulates a DMG, where the whole path is
 skipped, and a ROM built without `-Wm-ys` has its SGB packets discarded so mGBA
 emulates a plain DMG too. `make probe` therefore asserts the ROM's bytes (the SGB
 flag, the old-licensee byte, and that the border data is linked in whole), and
-whether the artwork looks right is an mGBA-with-SGB check by eye.
+the artwork itself is a check by eye - confirmed in mGBA 0.10.5 on 2026-09-30,
+which renders the border **with no SGB BIOS configured**, so there is nothing to
+install first.
 
 ## Not implemented yet (by design, see the plan)
 
