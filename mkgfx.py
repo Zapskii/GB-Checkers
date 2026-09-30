@@ -168,12 +168,30 @@ CURSOR = ["########",
           "########"]
 SPRITES = [enc(CURSOR)]
 
+# The moving piece, as a SPRITE, for the glide in main.c: the same four kinds
+# cut up the same way, uploaded immediately after the ring at sprite tile 1.
+# One character differs from the BG art and it is the whole reason these are a
+# second array rather than a slice of gfx_tiles: colour 0 on a sprite is a HOLE,
+# so the bare square a piece stands on is '.' here and not the '2' the BG art
+# paints it ("the dark square showing through").  Index 2 is opaque - reusing
+# the BG tiles directly would glide a mid-tone 16x16 block around the board.
+PIECE_SPRITES = []
+for kind, (label, body, detail, king) in enumerate(PIECE_KINDS):
+    art = piece_rows(body, detail, king)
+    for q in range(4):
+        dx, dy = q & 1, q >> 1
+        PIECE_SPRITES.append(
+            enc([r[8 * dx:8 * dx + 8].replace("2", ".")
+                 for r in art[8 * dy:8 * dy + 8]]))
+
 # ------------------------------------------------------------- self-check
 TILE_IDS = sorted(DRAWN)
 assert len(TILES) == 56, "expected 56 tiles, got %d" % len(TILES)
 assert TILE_IDS == list(range(56)), "unaccounted tile ids: %r" % (
     sorted(set(range(56)) - DRAWN))
 assert max(TILE_IDS) < 128, "tile id %d >= 128 reads the sprite bank" % max(TILE_IDS)
+assert len(SPRITES) == 1, "expected the one ring tile, got %d" % len(SPRITES)
+assert len(PIECE_SPRITES) == 16, "expected 16 piece sprites, got %d" % len(PIECE_SPRITES)
 
 # ----------------------------------------------------------------- output
 lines = [
@@ -203,6 +221,18 @@ lines += [
     "#define GFX_SPRITE_COUNT %d" % len(SPRITES),
     "#define SPR_CURSOR 0",
     "#define SPR_SEL 1",
+    "/* The four OAM slots a gliding piece uses, one per cell quadrant, the",
+    " * first free slot after the two rings.  Also parked at (0, 0). */",
+    "#define SPR_GLIDE0 2",
+    "",
+    "/* 1..16: the four kinds x four quadrants again, but as SPRITE tiles, for",
+    " * the glide.  They follow the ring, so they upload at sprite tile 1, and",
+    " * they are a separate array on purpose: colour 0 is a HOLE on a sprite, so",
+    " * the bare square is transparent here and the board shows through it - the",
+    " * BG art above paints that square '2' instead. */",
+    "#define SPR_PIECE0 %d" % len(SPRITES),
+    "#define GFX_PIECE_SPRITE_COUNT %d" % len(PIECE_SPRITES),
+    "#define SPR_PIECE(kind, dx, dy) (SPR_PIECE0 + 4 * (kind) + 2 * (dy) + (dx))",
     "",
     "static const uint8_t gfx_tiles[] = {",
 ]
@@ -211,9 +241,12 @@ for i, t in enumerate(TILES):
 lines += ["};", "", "static const uint8_t gfx_sprites[] = {"]
 for i, t in enumerate(SPRITES):
     lines.append("    " + ",".join("0x%02X" % b for b in t) + ",  /* %d */" % i)
+lines += ["};", "", "static const uint8_t gfx_piece_sprites[] = {"]
+for i, t in enumerate(PIECE_SPRITES):
+    lines.append("    " + ",".join("0x%02X" % b for b in t) + ",  /* %d */" % i)
 lines += ["};", "", "#endif", ""]
 
 with open("gfx.h", "w") as f:
     f.write("\n".join(lines))
-print("gfx.h: %d tiles (%d bytes), %d sprite tiles" %
-      (len(TILES), len(TILES) * 16, len(SPRITES)))
+print("gfx.h: %d tiles (%d bytes), %d ring sprite tiles, %d piece sprite tiles"
+      % (len(TILES), len(TILES) * 16, len(SPRITES), len(PIECE_SPRITES)))
