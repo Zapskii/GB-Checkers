@@ -1,14 +1,15 @@
 /* GB-DRAUGHTS - English draughts for the Game Boy (GBDK-2020).
  *
  * The rules engine lives in sim.h and is unit tested on the host; this file
- * owns everything that touches hardware.  P1 is boot + title + the empty board
- * grid, so nothing here needs sim.h yet - P2 adds it, along with the pieces.
+ * owns everything that touches hardware.  P2: a real Board, the start position
+ * on it, and a renderer that reads that Board square by square.
  *
- * Controls: START = leave the title screen.
+ * Controls: START = new game, leaving the title screen.
  */
 #include <gb/gb.h>
 #include <stdint.h>
 #include "gfx.h"
+#include "sim.h"
 
 /* ---------------------------------------------------------------- layout
  * From PLAN.md's data contract: the board is 8x8 cells of 2x2 tiles, at tiles
@@ -25,10 +26,13 @@
 typedef enum { ST_TITLE, ST_PLAY } State;
 
 /* ----------------------------------------------------------------- state
- * Only the state machine: the screen has no state of its own, it is rebuilt
- * from scratch every frame (P2 draws the pieces the same way). */
+ * The state machine and the rules engine's board.  The screen has no state of
+ * its own: draw_pieces() rebuilds every square from `board` every frame, so
+ * there is nothing to keep in sync and nothing for a mid-chain capture to
+ * leave stale. */
 static State   state;
 static uint8_t keys, pressed, prev_keys;
+static Board   board;
 
 /* The frame's whole tilemap, built then blitted in one write inside VBlank. */
 static uint8_t mapbuf[BOARD_TW * BOARD_TH];
@@ -66,6 +70,37 @@ static void build_board(void)
     }
 }
 
+/* Every square, every frame, straight out of `board` - no cache.  The engine
+ * is the only state and the screen is a function of it, so a rule change (a
+ * mandatory capture, a mid-chain hop) can never leave a stale piece behind. */
+static void draw_pieces(void)
+{
+    uint8_t sq;
+    for (sq = 0; sq < N_SQ; sq++) {
+        uint8_t who = sq_occupant(&board, sq);
+        uint8_t kind, row, col, dx, dy;
+
+        if (!who) continue;
+
+        /* T_PIECE's kind order is {black, white} x {man, king}. */
+        kind = (uint8_t)((who - 1u) + (sq_is_king(&board, sq) ? 2u : 0u));
+        row  = SQ_ROW(sq);
+        col  = SQ_COL(sq);
+
+        for (dy = 0; dy < 2; dy++) {
+            for (dx = 0; dx < 2; dx++) {
+                mapbuf[(2u * row + dy) * BOARD_TW + (2u * col + dx)] =
+                    T_PIECE(kind, dx, dy);
+            }
+        }
+    }
+}
+
+static void new_game(void)
+{
+    board = board_init();
+}
+
 /* ------------------------------------------------------------------ main */
 void main(void)
 {
@@ -90,11 +125,19 @@ void main(void)
         pressed = keys & ~prev_keys;
         prev_keys = keys;
 
-        if (state == ST_TITLE && (pressed & J_START)) state = ST_PLAY;
+        if (state == ST_TITLE && (pressed & J_START)) {
+            new_game();
+            state = ST_PLAY;
+        }
 
         /* Build the frame first, blit it second: the VRAM writes then land in
          * the VBlank window instead of being dropped by the PPU. */
-        if (state == ST_TITLE) build_title(); else build_board();
+        if (state == ST_TITLE) {
+            build_title();
+        } else {
+            build_board();
+            draw_pieces();
+        }
         wait_vbl_done();
         set_bkg_tiles(0, 0, BOARD_TW, BOARD_TH, mapbuf);
     }

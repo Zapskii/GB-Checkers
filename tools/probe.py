@@ -32,11 +32,13 @@ T_PIECE0 = 3                    # 4 kinds x 4 quadrants: 3..18
 T_DIGIT0, T_LETTER0 = 20, 30    # 20..29, 30..55
 
 # BG colour -> rendered pixel, for BGP = 0xE4 (colour 0 is the lightest shade).
-# PyBoy renders the four DMG shades as 255 / 170 / 85 / 0.  The two board tiles
-# are flat fills of colour 0 and colour 2, so a board cell has to come back as
-# exactly one of these two values all the way across.
-LIGHT_BG = 255                  # T_BLANK
-DARK_BG = 85                    # T_DARK
+# PyBoy's DMG palette renders the four shades as 255 / 153 / 85 / 0 -- the two
+# middle greys are 0x99 and 0x55, measured off the screen, not the 170 a naive
+# ramp would suggest.  P1 only ever reads colours 0 and 2, which is why it got
+# away with assuming; P2's pieces are the first thing to use colours 1 and 3.
+SHADE = (255, 153, 85, 0)
+LIGHT_BG = SHADE[0]             # T_BLANK
+DARK_BG = SHADE[2]              # T_DARK
 
 # --- layout ----------------------------------------------------------------
 MAP0 = 0x9800                   # BG tilemap
@@ -114,6 +116,10 @@ class Game:
         block = a[16 * sq_row:16 * sq_row + 16, 16 * sq_col:16 * sq_col + 16, 0]
         return bool((block == px).all())
 
+    def px(self, x, y):
+        """One rendered pixel of the BG (sprites aside -- see cell_flat)."""
+        return int(self.p.screen.ndarray[y, x, 0])
+
     def run(self, frames, buttons=""):
         """Press -> tick -> release, PER FRAME. A press held across ticks is not
         the same input: the game samples `pressed` edge-per-frame."""
@@ -168,21 +174,30 @@ def p1_boot_title_board(g):
     # Counted per SQUARE, not per tile.  A square is a 2x2 block of tiles, so
     # the 32 dark squares are 128 dark tiles and a tile count can never be 32 --
     # counting tiles here would fail on a perfectly correct board.  A square
-    # whose four tiles disagree is neither dark nor light, so the pair of
-    # counts still has to total 64.
-    dark = [(r, c) for r in range(8) for c in range(8) if g.cell_is(r, c, T_DARK)]
-    light = [(r, c) for r in range(8) for c in range(8) if g.cell_is(r, c, T_BLANK)]
-    check(len(dark) == 32, "exactly 32 dark cells in the board region (%d)" % len(dark))
-    check(len(light) == 32, "exactly 32 light cells in the board region (%d)" % len(light))
-
+    # whose four tiles disagree is neither dark nor light.
+    #
+    # A cell may also carry a whole piece (from P2 on), which is why this
+    # classifies rather than just counting fills: a light square is never
+    # playable so it is never a piece, and a bare playable square is the dark
+    # fill.  Everything else -- a piece on a light square, a half-drawn piece,
+    # the grid off by one -- lands in `bad`.
     bad = []
-    for row in range(8):
-        for col in range(8):
-            want = T_DARK if (row + col) & 1 else T_BLANK
-            if not g.cell_is(row, col, want):
-                bad.append((row, col, want))
-    check(not bad, "every cell is dark iff (row+col) is odd (%d wrong: %r)"
-          % (len(bad), bad[:4]))
+    n_light = 0
+    for r in range(8):
+        for c in range(8):
+            playable = bool((r + c) & 1)
+            if g.cell_is(r, c, T_BLANK):
+                n_light += 1
+                if playable:
+                    bad.append((r, c, "light fill on a playable square"))
+            elif g.cell_is(r, c, T_DARK):
+                if not playable:
+                    bad.append((r, c, "dark fill off the playable squares"))
+            elif not (playable and cell_kind(g, r, c) is not None):
+                bad.append((r, c, "neither a board fill nor a whole piece"))
+    check(not bad, "cells are the checkerboard, plus pieces only on playable "
+                   "squares (%d wrong: %r)" % (len(bad), bad[:4]))
+    check(n_light == 32, "exactly 32 light cells in the board region (%d)" % n_light)
 
     # The tilemap records WHICH id was written, never whether the bank behind
     # it holds the art.  GBDK's crt0 preloads its own ASCII font at 0x9000, so
@@ -193,18 +208,136 @@ def p1_boot_title_board(g):
     # shows up.  This is what makes the tile-id budget (< 128, i.e. inside the
     # 0x9000 page) an assertion rather than a comment.
     #
+    # Piece cells are excluded: they are deliberately not flat, and
+    # p2_start_position does the same trick for them (tiles 3..18 are just as
+    # able to hide the crt0 font behind their ids).
+    #
     # It reads whole cells, sprites included, so it holds only while nothing is
     # drawn over the board.  The cursor sprite is parked off-screen at (0, 0)
     # here; a phase that moves it onto a cell has to park it in this state or
     # narrow this check to the pixels the cursor does not cover.
     print("P1 rendered board")
-    bad = [(r, c) for r in range(8) for c in range(8)
+    bare = [(r, c) for r in range(8) for c in range(8)
+            if g.cell_is(r, c, T_DARK) or g.cell_is(r, c, T_BLANK)]
+    bad = [(r, c) for r, c in bare
            if not g.cell_flat(r, c, DARK_BG if (r + c) & 1 else LIGHT_BG)]
-    check(not bad, "every board cell renders flat in its own colour (%d off: %r)"
-          % (len(bad), bad[:4]))
+    check(not bad, "every bare board cell renders flat in its own colour (%d "
+          "off: %r)" % (len(bad), bad[:4]))
 
 
-CHECKS = [("p1_boot_title_board", p1_boot_title_board)]
+# ---------------------------------------------------------------- P2 --------
+# The engine's start position, and the square -> cell mapping board_geom.h
+# emits as SQ_ROW/SQ_COL.  Board is three little-endian uint32s.
+BLACK_START, WHITE_START = 0x0FFF, 0xFFF00000
+QUADS = ((0, 0), (1, 0), (0, 1), (1, 1))    # in `cells()` order
+BLACK_PIECE_PX, WHITE_PIECE_PX = SHADE[3], SHADE[1]   # the disc bodies
+PIECE_ART_PX = (5, 5)                       # disc body, for all four kinds
+
+WRAM0 = (0xC000, 0xE000)                    # the 8 KB the ROM addresses as WRAM
+
+
+def T_PIECE(kind, dx, dy):
+    """Mirrors gfx.h's macro: kind = {black, white} x {man, king}."""
+    return T_PIECE0 + 4 * kind + 2 * dy + dx
+
+
+def sq_row(sq):
+    return sq >> 2
+
+
+def sq_col(sq):
+    return ((sq & 3) << 1) + (((sq >> 2) & 1) ^ 1)
+
+
+def board_bytes(black, white, kings):
+    return b"".join(w.to_bytes(4, "little") for w in (black, white, kings))
+
+
+def cell_kind(g, r, c):
+    """The piece kind drawn in a cell, or None if the cell is not a whole
+    piece -- bare board, half-drawn, or garbage."""
+    got = [g.tile(x, y) for x, y in cells(r, c)]
+    for kind in range(4):
+        if got == [T_PIECE(kind, dx, dy) for dx, dy in QUADS]:
+            return kind
+    return None
+
+
+def p2_start_position(g):
+    """24 men at the start position, drawn from the engine's own Board."""
+    print("P2 start position")
+    g.start()
+    # A missing symbol is the power gate's answer (see Game.need): the phase
+    # that introduces `board` has not run.  Return before anything reaches for
+    # it, so this exits 1 rather than blowing up as a harness error.
+    if not g.need("board"):
+        return
+    addr = g.addr["board"]
+
+    # 1. what the SCREEN shows, read without consulting the engine at all.
+    kinds = {(r, c): cell_kind(g, r, c) for r in range(8) for c in range(8)}
+    black = sorted(k for k, v in kinds.items() if v == 0)
+    white = sorted(k for k, v in kinds.items() if v == 1)
+    check(len(black) == 12, "12 black men drawn (%d: %r)" % (len(black), black))
+    check(len(white) == 12, "12 white men drawn (%d: %r)" % (len(white), white))
+    check(all(r <= 2 for r, _ in black), "black men on rows 0-2 (%r)" % (black,))
+    check(all(r >= 5 for r, _ in white), "white men on rows 5-7 (%r)" % (white,))
+    check(not [k for k, v in kinds.items() if v in (2, 3)],
+          "no kings at the start position")
+    check(not [k for k, v in kinds.items() if v is not None and 3 <= k[0] <= 4],
+          "rows 3-4 carry no pieces")
+
+    # 2. the engine's own bytes, straight out of WRAM.
+    raw = bytes(g.p.memory[addr:addr + 12])
+    want = board_bytes(BLACK_START, WHITE_START, 0)
+    check(raw == want, "board == {0x%04X, 0x%08X, 0} at 0x%04X (got %s)"
+          % (BLACK_START, WHITE_START, addr, raw.hex()))
+
+    # 3. THE assertion this phase exists for.  A renderer and a state can both
+    # look right and disagree -- a piece one square over, or drawn from a copy
+    # of the board that is no longer the live one -- and nothing above catches
+    # it, because (1) never looked at the engine and (2) never looked at the
+    # screen.  This is the seam.
+    e_black = int.from_bytes(raw[0:4], "little")
+    e_white = int.from_bytes(raw[4:8], "little")
+    state = {}
+    for sq in range(32):
+        m = 1 << sq
+        state[(sq_row(sq), sq_col(sq))] = (0 if e_black & m else
+                                           1 if e_white & m else None)
+    wrong = sorted((k, kinds[k], v) for k, v in state.items() if kinds[k] != v)
+    check(not wrong, "the pieces drawn are the board, square for square "
+                     "(cell, drawn, board): %r" % (wrong[:4],))
+
+    # 4. tiles 3..18 have the same hole P1 describes for the board tiles: the
+    # map records the id, never whether the bank behind it holds the art.  A
+    # piece's corners are the bare square showing through and its body is at
+    # (5, 5) of the cell, so the rendered screen tells a disc from the crt0
+    # font glyph that would otherwise sit behind the same id.
+    bad = []
+    for (r, c), kind in sorted(kinds.items()):
+        if kind is None:
+            continue
+        body = BLACK_PIECE_PX if kind in (0, 2) else WHITE_PIECE_PX
+        got = (g.px(16 * c + PIECE_ART_PX[0], 16 * r + PIECE_ART_PX[1]),
+               g.px(16 * c, 16 * r))
+        if got != (body, DARK_BG):
+            bad.append((r, c, kind, got, (body, DARK_BG)))
+    check(not bad, "every piece cell renders as a disc on the bare square "
+                   "(%d off: %r)" % (len(bad), bad[:4]))
+
+    # 5. One board, not two.  The 12 bytes above are known a priori, so brute
+    # scan WRAM for them: exactly one hit, at the address the map named.  A
+    # second hit means main.c is drawing from a copy probe.py never looked at.
+    wram = bytes(g.p.memory[WRAM0[0]:WRAM0[1]])
+    hits = [WRAM0[0] + i for i in range(len(wram) - len(want) + 1)
+            if wram[i:i + len(want)] == want]
+    check(hits == [addr], "WRAM holds exactly one start position, at the map's "
+                          "board 0x%04X (%r)" % (addr, [hex(h) for h in hits]))
+
+
+CHECKS = [("p1_boot_title_board", p1_boot_title_board),
+          ("p2_start_position", p2_start_position)]
 
 
 def main(rom, mapfile):

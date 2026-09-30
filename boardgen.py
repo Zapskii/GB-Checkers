@@ -34,6 +34,19 @@ def idx_to_coord(idx):
     return row, col
 
 
+# The same mapping written as the arithmetic board_geom.h emits as SQ_ROW /
+# SQ_COL, so C never derives square -> screen geometry on its own.  Nothing
+# else in the game may re-express this: two sources of truth is how the
+# renderer and the rules end up placing a piece on different squares while
+# both look right.  self_check() holds these two spellings together.
+def sq_row(idx):
+    return idx >> 2
+
+
+def sq_col(idx):
+    return ((idx & 3) << 1) + (((idx >> 2) & 1) ^ 1)
+
+
 def coord_to_idx(row, col):
     if not (0 <= row < 8 and 0 <= col < 8):
         return None
@@ -57,6 +70,13 @@ def self_check(neigh):
     for idx in range(N_SQ):
         row, col = idx_to_coord(idx)
         assert coord_to_idx(row, col) == idx, idx
+
+    # The emitted SQ_ROW/SQ_COL macros and idx_to_coord() - which NEIGH is
+    # built from and which probe.py's cells() assumes - are one mapping
+    # spelled twice.  Catch a divergence here, not as a piece drawn one
+    # square over on hardware.
+    for idx in range(N_SQ):
+        assert (sq_row(idx), sq_col(idx)) == idx_to_coord(idx), idx
 
     # Symmetry: if A's neighbor in dir d is B, B's neighbor in the opposite
     # direction is A. This is the geometry equivalent of GB-Protector's
@@ -110,6 +130,13 @@ def main():
         "#define WHITE_START 0x%08Xu" % white_start,
         "#define BLACK_KING_ROW_MIN 28u   /* squares 28-31 */",
         "#define WHITE_KING_ROW_MAX 3u    /* squares 0-3   */",
+        "",
+        "/* Square -> the 8x8 cell it sits in: row 0 is the top row, col 0 the",
+        " * left, and a cell is the 2x2 tiles at (2*col, 2*row).  Identical to",
+        " * idx_to_coord() in boardgen.py, which NEIGH is built from and which",
+        " * tools/probe.py's cells() assumes - self-checked against it there. */",
+        "#define SQ_ROW(sq) ((sq) >> 2)",
+        "#define SQ_COL(sq) ((((sq) & 3) << 1) + ((((sq) >> 2) & 1) ^ 1))",
         "",
         "/* NEIGH[sq][DIR_*] = adjacent square in that direction, or NO_SQ. */",
         "static const uint8_t NEIGH[N_SQ][4] = {",

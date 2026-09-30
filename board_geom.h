@@ -19,6 +19,13 @@
 #define BLACK_KING_ROW_MIN 28u   /* squares 28-31 */
 #define WHITE_KING_ROW_MAX 3u    /* squares 0-3   */
 
+/* Square -> the 8x8 cell it sits in: row 0 is the top row, col 0 the
+ * left, and a cell is the 2x2 tiles at (2*col, 2*row).  Identical to
+ * idx_to_coord() in boardgen.py, which NEIGH is built from and which
+ * tools/probe.py's cells() assumes - self-checked against it there. */
+#define SQ_ROW(sq) ((sq) >> 2)
+#define SQ_COL(sq) ((((sq) & 3) << 1) + ((((sq) >> 2) & 1) ^ 1))
+
 /* NEIGH[sq][DIR_*] = adjacent square in that direction, or NO_SQ. */
 static const uint8_t NEIGH[N_SQ][4] = {
     { NO_SQ, NO_SQ,  4,  5 },  /*  0 */
