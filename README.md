@@ -10,8 +10,9 @@ is complete: a full two-player pass-and-play game with title screen, board and
 cursor, mandatory capture, multi-jump chains, promotion, win detection and
 restart. Milestone 2 adds an opponent: the title screen opens on **1 PLAYER**,
 and the machine plays white, the human black, with the moves making their own
-noises. SELECT takes a turn back - see [Undo](#undo). `make` builds the ROM,
-`make test` runs
+noises and the pieces gliding from square to square - see
+[Animation](#animation). SELECT takes a turn back - see [Undo](#undo). `make`
+builds the ROM, `make test` runs
 the rules engine's unit tests on the host, and `make probe` drives the ROM in a
 headless emulator and asserts on what it did.
 
@@ -43,18 +44,20 @@ The machine is always white, so the human always opens - black moves first. Its
 turn is a blocking one: the status row says **THINKING**, the screen is blitted
 with that line *before* the search starts, and the loop is frozen for as long as
 the search takes. **Measured** (P11, worst of the positions tried, in emulator
-frames of 16.7 ms): 177 at the start position (3.0 s), **384 on a busy twelve-piece
-midgame (6.4 s, the worst case)**, 82 with four pieces left (1.4 s). `make probe`
-fails the build if any position overruns the 600-frame budget that pins that
-worst case. Because the think is
+frames of 16.7 ms): 183 at the start position (3.1 s), **390 on a busy twelve-piece
+midgame (6.5 s, the worst case)**, 88 with four pieces left (1.5 s). Those are
+the P17 numbers - the same three positions with the reply's glide counted in
+(the animation runs inside the think; it cost 6 to 8 frames a position). `make
+probe` fails the build if any position overruns the 600-frame budget that pins
+that worst case. Because the think is
 blocking, START and B pressed during it are dropped - the game restarts a moment
 later instead of not at all.
 
 The machine chooses from the same legal move list a human does, at the same
 depth every turn, and its move is applied through the same `play()` the human's
-goes through - so mandatory capture, the chain rule and
-promotion-stops-the-chain apply to it by construction rather than by a second
-implementation. It never drives the cursor or animates.
+goes through - so mandatory capture, the chain rule, promotion-stops-the-chain
+and the glide apply to it by construction rather than by a second
+implementation. It never drives the cursor.
 
 The d-pad is rotated 45 degrees: **UP** and **RIGHT** both go up the screen,
 **DOWN** and **LEFT** both go down, and nothing moves straight sideways. A
@@ -102,6 +105,29 @@ The last 32 turns are kept, in WRAM only - 416 bytes of the 2539 free. That is
 a ceiling rather than a rolling window, so a game that runs past turn 32 keeps
 playing fine, it just stops remembering older turns.
 
+## Animation
+
+A hop is a glide: the piece leaves the board, four sprites carry it across the
+squares between, and the board gets it back where it lands. Six frames a hop,
+about a tenth of a second - the same six for the machine's replies, since they
+go through the same `play()`. A chain glides each hop of it, and a hop that
+crowns glides a *man* and is crowned on landing.
+
+The sprites are their own art, not the board tiles: on a sprite colour 0 is a
+hole and the board art paints the square around the disc as an opaque colour,
+so reusing the board tiles would drag a mid-tone block around the board. That
+art is generated from the same definitions in `mkgfx.py`, and it is a
+separate array with its own count so the ring's boot upload cannot read off its
+end.
+
+The glide is a blocking call inside the turn, like the think, not something
+time-sliced across frames. Two things follow. It cannot be interrupted, so the
+d-pad does nothing for those six frames. And it happens *before* the move is
+applied - the piece is animated on the board it is still standing on, the
+square it leaves is cleared as the sprite takes it, and the ordinary
+end-of-frame redraw paints the result - so nothing can catch it half-applied.
+Undo and the opening deal are not animated: they are instant.
+
 ## Rules implemented
 
 - Standard 8x8 board, 32 playable (dark) squares.
@@ -142,8 +168,9 @@ install first.
 - Difficulty levels, or a machine that plays black. There is one depth, chosen
   by measuring the worst-case think (P11), and the machine is white only.
 - Thinking that can be interrupted: the search is a blocking call, so the loop
-  genuinely stops while the machine replies. Time-slicing it is the named
-  upgrade path if the measurement ever demands one.
+  genuinely stops while the machine replies, and the move animation is blocking
+  in the same way. Time-slicing either is the named upgrade path if the
+  measurement ever demands one.
 - International/10x10 draughts or flying kings (different capture rules
   entirely - would touch move generation throughout, not attempted here).
 - Draw detection (40-move/repetition rules). Because there is none, a game
@@ -176,7 +203,7 @@ list the statics the probe reads), so if you want the release binary, run
 | `main.c`           | Everything that touches hardware: state machine, input, rendering, and the machine's turn |
 | `boardgen.py`      | Generates the 32-square diagonal neighbor table + self-checks |
 | `board_geom.h`     | Generated, committed - a plain `make test` needs no Python   |
-| `mkgfx.py`         | Generates `gfx.h` (tile art, ids, the cursor sprite)          |
+| `mkgfx.py`         | Generates `gfx.h` (tile art, ids, the cursor sprite and the glide's piece sprites) |
 | `gfx.h`            | Generated, committed. Included by `main.c` only               |
 | `art/border_sgb.png` | The SGB border artwork (256x224, game area transparent)     |
 | `border_data.c/.h` | Generated from that PNG, committed, like `gfx.h`              |
@@ -192,9 +219,9 @@ list the statics the probe reads), so if you want the release binary, run
 
 | Bank    | Size  | Used        | Free        |
 |---------|-------|-------------|-------------|
-| ROM_0   | 16384 | 10425 (64%) | 5959 (36%)  |
+| ROM_0   | 16384 | 11777 (72%) | 4607 (28%)  |
 | ROM_1   | 16384 | 7744 (47%)  | 8640 (53%)  |
-| WRAM_LO | 4096  | 1557 (38%)  | 2539 (62%)  |
+| WRAM_LO | 4096  | 1974 (48%)  | 2122 (52%)  |
 
 The AI is most of the WRAM: its search arena is `AI_MAX_PLY` `AiFrame`s, about a
 kilobyte, held at file scope in `main.c` rather than on the stack - a kilobyte of
@@ -208,10 +235,10 @@ border` writes, via `png2asset -b 1`) and the `-Wl-b_CODE_1=0x4000` area in
 0x4000-0x7FFF and `main.c` hands `set_sgb_border()` plain pointers: no
 `SWITCH_ROM`, no `BANKED`, no MBC. Before P15 those same blobs were linked in
 beside the code in bank 0, which is where the room was running out. Anything
-substantial from here - link cable play, move animation - can take the same
-route.
+substantial from here - link cable play - can take the same route.
 
-Undo did **not** need it: the history is 416 bytes of WRAM, not ROM.
+Neither the glide (P17, 1352 bytes of bank 0: 256 of sprite art and the rest
+code) nor undo (P16, 416 bytes of WRAM) needed it. Bank 0 has 4607 bytes free.
 
 ## How the board is represented
 
@@ -260,6 +287,12 @@ the BG tilemap and on `main.c`'s own variables (read out of the linker map).
 It is where the promotion trap and the end-of-turn loss test are pinned: a
 rules bug that only ever shows up through the turn loop is invisible to
 `tests/test_sim.c`.
+
+`p17_animation` is the one check that is a *sequence* rather than a state: it
+presses A one frame at a time and reads the glide's four sprites every frame,
+because the whole animation is shorter than the 38 frames `tap()` swallows.
+Every other check asserts on where the game ended up; this one asserts on what
+it did on the way there.
 
 ## License
 

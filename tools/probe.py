@@ -2471,6 +2471,226 @@ def p16_undo(g):
           "again: the same one legal move (%r)" % (legal_moves(g),))
 
 
+# --------------------------------------------------------------- P17 -------
+# gfx.h's sprite numbering, mirrored the way T_PIECE and the State enum already
+# are: the ring is sprite tile 0 in OAM slots 0 and 1, the glide's piece art is
+# sprite tiles 1..16 in OAM slots 2..5.
+SPR_GLIDE0, SPR_PIECE0 = 2, 1
+
+
+def SPR_PIECE(kind, dx, dy):
+    return SPR_PIECE0 + 4 * kind + 2 * dy + dx
+
+
+def oam_slot(g, i):
+    """One OAM slot as (x, y, tile), or None when it is parked off-screen.
+
+    Parked is OAM y = 0 (see Game.cursor_box), which is where the glide's four
+    slots sit when nothing is gliding."""
+    y, x, t = (g.p.memory[OAM + 4 * i], g.p.memory[OAM + 4 * i + 1],
+               g.p.memory[OAM + 4 * i + 2])
+    if y == 0 or y >= 160 or x == 0 or x >= 169:
+        return None
+    return (x, y, t)
+
+
+def glide_sprite(g):
+    """The moving piece's top-left quadrant sprite: (x, y, tile), or None when
+    the glide's slots are parked."""
+    return oam_slot(g, SPR_GLIDE0)
+
+
+def bg_at(x, y):
+    """The colour a bare board cell renders at screen pixel (x, y).
+
+    The board is the same checkerboard build_board() paints, so this is
+    derived rather than read: a pixel is on a playable (dark) cell when its
+    cell's row+col is odd.  Used to say what a TRANSPARENT sprite pixel must
+    show - the glide's piece art leaves its square as colour 0, which is a
+    hole on a sprite, so the board has to come through."""
+    return DARK_BG if ((y // 16) + (x // 16)) & 1 else LIGHT_BG
+
+
+def p17_animation(g):
+    """A hop is a glide: the piece leaves the BG, four sprites carry it across
+    the squares between, and the board gets it back at the far end.
+
+    THE CHECK IS A SEQUENCE, NOT AN END STATE, and that is the whole design.
+    The animation is six frames of a blocking vsync() loop inside play(), and
+    tap() swallows 38 frames - so a check written with tap() sees only the
+    settled board and passes on a build with no animation at all.  The press
+    that plays the move is stepped ONE FRAME AT A TIME instead, and every frame
+    of the glide is looked at: the OAM of the four slots, the source cell's BG
+    tiles, and the rendered pixel at the sprite's own corner.
+
+    MEASURED, on this ROM, for the 9 -> 13 man's hop (OAM x/y of the top-left
+    quadrant sprite, one row per emulator frame after the press):
+
+        (56,48) source, drawn on the BG     the frame before the press
+        None                                the shadow OAM has not been DMA'd
+        None                                ...and the source is still the BG's
+        (54,50) (51,53) (48,56) (46,58) (43,61)     the five mid-air frames
+        None                                parked, the piece in the BG again
+
+    The OAM read and the frame being rendered are a tick apart - move_sprite
+    writes GBDK's shadow OAM, which the VBlank ISR DMAs - which is why the
+    pixels here are read only at the sprite's own corner, and why main.c clears
+    the source cell on the glide's SECOND frame and not its first.  Measured,
+    counting the piece's pixels across the four cells the hop crosses, one
+    frame per tick: 48 48 48 69 90 104 97 96 48 48 - the piece on every frame.
+    Clearing on frame one instead gave 48 48 0 69 ..., a frame with the piece
+    nowhere at all.  That offset is a measurement of this emulator's tick, not
+    a rule of the hardware, so main.c's glide loop carries the same table and
+    says which side of it is the bug.
+
+    POWER GATE: skip the glide - apply the move directly - and the four slots
+    stay parked for the whole move, so there are no intermediate positions at
+    all and the MID-AIR assertion below fails while every end-state assertion
+    still passes.  That is the difference between seeing motion and seeing its
+    outcome.
+    """
+    print("P17 a hop glides")
+    g.start()           # 2 players: no machine reply to interleave with the hop
+    if not g.need("board", "side", "state", "sel", "cursor", "n_moves",
+                  "moves"):
+        return
+
+    SRC, DST = 9, 13            # the p4 move: a black man's quiet hop
+    sr, sc = sq_row(SRC), sq_col(SRC)
+    dr, dc = sq_row(DST), sq_col(DST)
+    KIND = 0                    # {black, white} x {man, king}: a black man
+    src_oam = (16 * sc + 8, 16 * sr + 16)     # the 2x2 block's top-left, in OAM
+    dst_oam = (16 * dc + 8, 16 * dr + 16)     # (+8/+16, as put_ring does)
+
+    set_cursor(g, SRC)
+    tap(g, "A")
+    check(g.var("sel") == SRC and g.var("state") == ST_TARGET,
+          "A picks the man on 9 up (%#x, state %d)"
+          % (g.var("sel"), g.var("state")))
+    check(cycle_to(g, DST), "and cycles the cursor to 13 (%d)" % g.var("cursor"))
+
+    # --- the press, and every frame after it ------------------------------
+    # One frame at a time, until `frame` moves: main.c reads the joypad and
+    # increments the counter in the same turn of the loop, so a counter that
+    # moved during the pressed frame means that read saw the key down - and one
+    # frame is shorter than one turn of the loop, so it cannot also have taken
+    # the repeat branch.  (Same reasoning as step(); this one then keeps
+    # ticking one frame at a time instead of settling.)
+    sampled = False
+    for _ in range(60):
+        before = g.var("frame")
+        g.run(1, "A")
+        if g.var("frame") != before:
+            sampled = True
+            break
+    check(sampled, "the loop sampled the A press within 60 frames")
+
+    frames = []
+    for _ in range(12):
+        gl = glide_sprite(g)
+        frames.append({
+            "gl": gl,
+            "slots": [oam_slot(g, SPR_GLIDE0 + i) for i in range(4)],
+            "src": [g.tile(x, y) for x, y in cells(sr, sc)],
+            "corner": g.px(gl[0] - 8, gl[1] - 16) if gl else None,
+            "side": g.var("side"),
+        })
+        g.run(1)
+
+    # --- and it settles ----------------------------------------------------
+    # FIRST, on purpose: this half of the check is about the OUTCOME, and it
+    # passes on a build with no animation at all.  The power gate is the other
+    # half - the mid-air sequence below is the only thing in this check that a
+    # missing glide can fail, so the two are kept apart and both are reported.
+    g.run(20)
+    check(glide_sprite(g) is None,
+          "after the hop the glide's sprites are parked again (%r)"
+          % (glide_sprite(g),))
+    check(cell_kind(g, dr, dc) == KIND,
+          "the man is drawn whole in the destination cell (%r)"
+          % ([g.tile(x, y) for x, y in cells(dr, dc)],))
+    check(g.cell_is(sr, sc, T_DARK),
+          "and the cell it left is bare board (%r)"
+          % ([g.tile(x, y) for x, y in cells(sr, sc)],))
+    check(g.var("side") == SIDE_WHITE,
+          "the turn passed exactly once (%d)" % g.var("side"))
+    want = apply_move(BLACK_START, WHITE_START, 0,
+                      {"from": SRC, "to": DST, "capture": NO_SQ})
+    check(board_masks(g) == want,
+          "and the board is the hop applied - no more, no less (%s)"
+          % maskstr(board_masks(g)))
+
+    # --- the same hop, as motion -------------------------------------------
+    # The frames where the piece is in the air: a sprite is on the screen and
+    # it is at neither end of the hop.  A parked slot reads None (OAM y = 0),
+    # which is every frame of a build without the glide - so this list is what
+    # a missing animation cannot produce.
+    mid = [f for f in frames
+           if f["gl"] and f["gl"][:2] != src_oam and f["gl"][:2] != dst_oam]
+    check(len(mid) >= 3,
+          "the piece is drawn in mid-air on %d frames, between the two cells "
+          "(%r of %d sampled)" % (len(mid), [f["gl"] for f in mid], len(frames)))
+    if not mid:
+        return
+
+    positions = [f["gl"][:2] for f in mid]
+    check(len(set(positions)) >= 3,
+          "and it MOVES: %d distinct positions between %r and %r"
+          % (len(set(positions)), src_oam, dst_oam))
+    # Every one of them is inside the box the hop spans: x between the two
+    # cells' starts (the glide goes down-left here, so descending) and y
+    # ascending.  A sprite that jumped straight to the destination, or the
+    # cursor ring wandering in, would land outside this.
+    check(all(dst_oam[0] <= x <= src_oam[0] and src_oam[1] <= y <= dst_oam[1]
+              for x, y in positions),
+          "and every one is between the two cells (%r, between %r and %r)"
+          % (positions, src_oam, dst_oam))
+
+    # The source square has left the BG: read from the tilemap, which the glide
+    # writes directly.  The other end is still bare - the piece is a sprite,
+    # and `board` has not moved yet.
+    check(all(f["src"] == [T_DARK] * 4 for f in mid),
+          "the source cell is bare BG while the piece is in the air (%r)"
+          % ([f["src"] for f in mid][:2],))
+    check(all(f["side"] == SIDE_BLACK for f in mid),
+          "and the turn has not passed yet - black is still to move (%r)"
+          % ([f["side"] for f in mid],))
+
+    # The four slots, as one 2x2 piece: quadrant q of the block carries
+    # SPR_PIECE(kind, q&1, q>>1) and sits at (x + 8*(q&1), y + 8*(q>>1)).  A
+    # glide that uploaded the BG tiles instead would still be caught here only
+    # if the ids were wrong - which is why the corner read below is the one
+    # that decides whether the ART is the sprite variant.
+    wrong = []
+    for f in mid:
+        x, y = f["gl"][:2]
+        want = [(x + 8 * (q & 1), y + 8 * (q >> 1), SPR_PIECE(KIND, q & 1, q >> 1))
+                for q in range(4)]
+        if sorted(f["slots"]) != sorted(want):
+            wrong.append((f["slots"], want))
+    check(not wrong,
+          "the four slots are the piece's four quadrants, tiles %d..%d "
+          "(%d frames wrong: %r)"
+          % (SPR_PIECE(KIND, 0, 0), SPR_PIECE(KIND, 1, 1), len(wrong),
+             wrong[:1]))
+
+    # The sprite's corner is a HOLE, not a colour.  The piece art's square is
+    # bare board on a sprite (colour 0 = transparent) and mid-tone on the BG
+    # (colour 2, opaque), so a glide built out of the BG tiles would paint an
+    # opaque block over the board and this reads the block's colour instead of
+    # the cell's.  It is read at the sprite's own corner, over the unplayable
+    # light cell the hop crosses - and that point is inside the transparent
+    # square for the position the OAM names AND for one step either side of it
+    # (2/3/5/7 px into the box are all colour 0), which is what makes it
+    # survive the read/render offset described above.
+    bad = [(f["gl"][:2], f["corner"], bg_at(f["gl"][0] - 8, f["gl"][1] - 16))
+           for f in mid
+           if f["corner"] != bg_at(f["gl"][0] - 8, f["gl"][1] - 16)]
+    check(not bad,
+          "and its square is transparent - the board shows through between the "
+          "disc's corners (%d off: %r)" % (len(bad), bad[:4]))
+
+
 CHECKS = [("p1_boot_title_board", p1_boot_title_board),
           ("p2_start_position", p2_start_position),
           ("p3_select_and_highlight", p3_select_and_highlight),
@@ -2486,7 +2706,8 @@ CHECKS = [("p1_boot_title_board", p1_boot_title_board),
           ("p12_sfx", p12_sfx),
           ("p13_sgb_border", p13_sgb_border),
           ("p14_one_player_default", p14_one_player_default),
-          ("p16_undo", p16_undo)]
+          ("p16_undo", p16_undo),
+          ("p17_animation", p17_animation)]
 
 
 def main(rom, mapfile):

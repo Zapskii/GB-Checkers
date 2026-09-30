@@ -27,6 +27,12 @@
  * a title-only control), so it takes the key there; no rule changes, and sim.h
  * is untouched.
  *
+ * P17 animates a hop.  The piece leaves the BG, four sprites in the four OAM
+ * slots the two rings leave free carry it across the squares between, and the
+ * board gets it back at the far end.  The glide is inside play() too, on the
+ * PRE-move board, so the human's hops and the machine's are animated by one
+ * implementation - and it is blocking, like the think, not time-sliced.
+ *
  * Controls: START = new game, SELECT = 2/1 PLAYER (title screen only) or UNDO
  * during play, d-pad = move the cursor, A = select/play, B = deselect (and, in
  * ST_OVER, also new game).
@@ -150,13 +156,13 @@ static uint8_t mode_1p = 1u;
  * (tools/probe.py's p11_think_budget, which walks the same three positions):
  *
  *   position                     depth 2   depth 3   depth 4
- *   opening (the start)            177      1395      4236
- *   midgame, 12 pieces             384      1046      2712
- *   endgame, 4 pieces               80       304       317
+ *   opening (the start)            183      1395      4236
+ *   midgame, 12 pieces             390      1046      2712
+ *   endgame, 4 pieces               88       304       317
  *
  * The numbers are EMULATOR FRAMES (16.7 ms each) of the whole think, worst of
  * the fuzz draws tried, on the SDCC build.  The budget is 600 frames; the
- * worst think at depth 2 is 384 (6.4 s), at depth 3 it is 1395 (23 s), so 2 is
+ * worst think at depth 2 is 390 (6.5 s), at depth 3 it is 1395 (23 s), so 2 is
  * the largest depth that fits and this stays where P10 left it - now for a
  * measured reason instead of a guessed one.  Two things about the shape of the
  * table: cost is not monotone in pieces (the start position has 24 of them but
@@ -164,6 +170,17 @@ static uint8_t mode_1p = 1u;
  * deep enough to run out of alpha-beta cutoffs), and one ply is not a fixed
  * multiplier (a deeper search prunes differently; midgame1 is 861 at depth 3
  * and 804 at depth 4).
+ *
+ * P17 RE-MEASURED THE DEPTH-2 ROW, and only that row: the glide is inside
+ * play(), which is how the machine plays its reply, so the animation's frames
+ * are inside this window.  177 -> 183, 384 -> 390, 80 -> 88 - about the
+ * GLIDE_FRAMES a single-hop reply costs (the endgame's 8 says the reply there
+ * was a hop of a chain, or a tick of measurement noise).  The depth 3 and 4
+ * columns are still P11's, and are now a few frames of glide short; that does
+ * not move the choice (1395 + 7 is still 23 s) and re-measuring 4 minutes of
+ * search to correct 0.5% would not either.  The budget is a ceiling, not a
+ * target: the way to fit inside it is a shallower search, never a shorter
+ * animation.
  *
  * The search is a blocking call, so an over-optimistic value here is a frozen
  * screen, not a merely slow one.  The check fails on a budget overrun rather
@@ -429,6 +446,141 @@ static void play_promote(void)
     NR44_REG = 0x80;                /* trigger */
 }
 
+/* ------------------------------------------------------------ P17: the glide
+ * A hop, animated: the piece leaves the BG, four sprites carry it across the
+ * squares between, and the board gets it back at the far end.  Four OAM slots,
+ * one per quadrant of the piece, because a piece is a 16x16 cell and a sprite
+ * is 8x8 - slots 2..5, the first four free ones (0 and 1 are the two rings).
+ *
+ * THE SPRITE ART IS ITS OWN ARRAY, and it has to be.  On a sprite, colour 0 is
+ * a HOLE; the BG art paints the bare square around the disc as colour 2, which
+ * is OPAQUE.  A glide built out of gfx_tiles would therefore drag a 16x16
+ * mid-tone block around the board with the piece on top of it.  gfx.h's
+ * gfx_piece_sprites is the same art with that square left as colour 0, it is
+ * uploaded at sprite tile SPR_PIECE0, and its count is its own so the boot
+ * upload of the ring cannot walk off the end of gfx_sprites.
+ *
+ * It runs inside play(), ON THE PRE-MOVE BOARD: the piece is still where it
+ * is until the hop is over and the destination is still empty (a capture lands
+ * behind what it took), so the source cell can be cleared and the destination
+ * drawn without the screen ever being ahead of `board`.  play() otherwise does
+ * not draw at all; these two 2x2 sub-rectangle blits are the first blits in
+ * the tree that are not the frame's one 16x16 rebuild, and they are only safe
+ * where they are called - straight after a vsync(), with VRAM writable.
+ *
+ * Blocking, like the think, and deliberately not time-sliced: GLIDE_FRAMES of
+ * vsync() per hop, which `frame` does not count (it moves once per turn of the
+ * main loop, not once per emulator frame), so P11's "one blocked turn of the
+ * loop" still holds.  Each hop's frames DO land inside P11's think window: the
+ * machine's reply is played by play(), so the worst think is P11's 384 frames
+ * plus GLIDE_FRAMES + 1 per hop of the reply - re-measured at 390, and the
+ * table at AI_DEPTH carries the three.
+ *
+ * THE ONE THING IT COSTS THE SCREEN, measured rather than reasoned about: the
+ * clear is a 2x2 write into the board region, and the board region is where
+ * the status row lives - tile row 10, cells in row 5.  So a hop whose SOURCE
+ * cell is in row 5 and columns 2-5 (squares 21 and 22, the two middle men of
+ * white's back rank) eats the middle of THINKING for the rest of the glide:
+ * measured on a white man on 22, the think cost 25 frames and THINKING was
+ * whole for the first 18 of them, with '..  THIN..NG..' for the other 7 -
+ * about 120 ms.  It is a visual transient and nothing more: the loop's rebuild
+ * repaints the whole screen one frame after the glide ends, THINKING going
+ * away with it because the turn is over anyway, and no check reads the status
+ * row during a think.  P11's "THINKING was on screen through the think" still
+ * measures `seen == n` in its three positions, which is the honest bound on
+ * this: it is real, it is short, and it does not survive the turn. */
+#define GLIDE_FRAMES 6  /* NO `u`: the usual arithmetic conversions would make
+                         * the interpolation below unsigned, and a negative
+                         * dx/dy product then wraps instead of interpolating. */
+
+/* One cell's 2x2 tiles, straight into the BG map. */
+static void blit_cell(uint8_t sq, const uint8_t *four)
+{
+    set_bkg_tiles((uint8_t)(2u * SQ_COL(sq)), (uint8_t)(2u * SQ_ROW(sq)),
+                  2u, 2u, four);
+}
+
+/* The glide's four slots, parked at OAM (0, 0) - the DMG's "hide this sprite"
+ * position, which is where put_ring() parks the rings too. */
+static void park_glide(void)
+{
+    move_sprite(SPR_GLIDE0, 0, 0);
+    move_sprite((uint8_t)(SPR_GLIDE0 + 1u), 0, 0);
+    move_sprite((uint8_t)(SPR_GLIDE0 + 2u), 0, 0);
+    move_sprite((uint8_t)(SPR_GLIDE0 + 3u), 0, 0);
+}
+
+static void glide_piece(uint8_t from, uint8_t to)
+{
+    /* The kind is read off the board the hop has NOT been applied to, which is
+     * the point: a crowning hop glides a MAN and is crowned by the rebuild
+     * afterwards, the same way move_causes_promotion() gets it right by asking
+     * the board before the move. */
+    uint8_t who  = sq_occupant(&board, from);
+    uint8_t kind = (uint8_t)((who - 1u) + (sq_is_king(&board, from) ? 2u : 0u));
+    uint8_t bare[4], piece[4];
+    uint8_t q, dx, dy, f;
+    int16_t x0, y0, x1, y1, ox, oy;
+
+    /* Slot q is quadrant (dx, dy) of the piece, tile and position alike, so the
+     * four tiles, the four slots and the four offsets are one order and cannot
+     * drift apart.  The bare fill is the cell's own checkerboard colour - the
+     * same rule build_board() paints the whole board with. */
+    for (q = 0; q < 4u; q++) {
+        dx = (uint8_t)(q & 1u);
+        dy = (uint8_t)(q >> 1);
+        bare[q]  = ((SQ_ROW(from) + SQ_COL(from)) & 1u) ? T_DARK : T_BLANK;
+        piece[q] = T_PIECE(kind, dx, dy);
+        set_sprite_tile((uint8_t)(SPR_GLIDE0 + q), SPR_PIECE(kind, dx, dy));
+    }
+
+    /* OAM coordinates of the block's top-left corner, not screen ones: the DMG
+     * draws a sprite at (x-8, y-16) of what is written (see put_ring). The
+     * quadrant offsets are 8 px because each sprite is one tile of the 2x2. */
+    x0 = (int16_t)(16u * SQ_COL(from) + 8u);
+    y0 = (int16_t)(16u * SQ_ROW(from) + 16u);
+    x1 = (int16_t)(16u * SQ_COL(to) + 8u);
+    y1 = (int16_t)(16u * SQ_ROW(to) + 16u);
+
+    for (f = 1; f <= GLIDE_FRAMES; f++) {
+        vsync();
+        /* Frame TWO clears the source cell, not frame one, and the one-frame
+         * delay is load-bearing.  The two kinds of write do not ripen at the
+         * same speed: a BG map write lands in the frame after its VBlank, and a
+         * move_sprite goes into GBDK's shadow OAM, which the VBlank ISR DMAs -
+         * so the sprite shows up one frame after a tilemap write made in the
+         * same VBlank.  MEASURED, counting the piece's pixels across the four
+         * cells the hop crosses, one frame per emulator tick:
+         *
+         *   clear on frame 1:   48 48  0 69 90 104 97 96 48 48 ...
+         *   clear on frame 2:   48 48 48 69 90 104 97 96 48 48 ...
+         *
+         * The 0 is the piece MISSING for a frame - the source already bare and
+         * the sprite not yet drawn - and clearing one frame later is what
+         * removes it: the clear then ripens in the same frame as the sprite's
+         * first position, 2 px from the square it left. */
+        if (f == 2u) blit_cell(from, bare);
+        ox = (int16_t)(x0 + (x1 - x0) * f / GLIDE_FRAMES);
+        oy = (int16_t)(y0 + (y1 - y0) * f / GLIDE_FRAMES);
+        for (dy = 0; dy < 2u; dy++) {
+            for (dx = 0; dx < 2u; dx++) {
+                move_sprite((uint8_t)(SPR_GLIDE0 + 2u * dy + dx),
+                            (uint8_t)(ox + 8 * dx), (uint8_t)(oy + 8 * dy));
+            }
+        }
+    }
+
+    /* ...and hands the piece back to the board at the destination, in the same
+     * VBlank the sprites are parked in.  Without this the piece would be off
+     * the screen for the one frame between the last sprite and the rebuild that
+     * the rest of the loop does at the next VBlank - the BG map is painted
+     * here, one frame early, with the position the rebuild is about to paint
+     * anyway.  Still the pre-move `board` at this line; nothing reads the
+     * screen between here and the rebuild. */
+    blit_cell(to, piece);
+    park_glide();
+}
+
 /* Plays the move that goes from `from` to `to`.  The move comes straight out of
  * the list the screen is showing, so what gets applied is exactly what was
  * highlighted - and for the machine, exactly what the search chose.
@@ -508,6 +660,10 @@ static void play(uint8_t from, uint8_t to)
         }
 
         before = board;
+        /* P17: the hop itself, animated, and still against the pre-move board -
+         * `board` moves on the line after it.  Six frames of vsync() per hop,
+         * inside this one turn of the loop. */
+        glide_piece(from, to);
         board = apply_move(board, m);
         promoted = move_causes_promotion(&before, m);
 
@@ -936,13 +1092,18 @@ void main(void)
 {
     DISPLAY_OFF;
     /* BG tiles and OBJ tiles are different VRAM, so the cursor is its own
-     * little array rather than a slice of the BG bank. */
+     * little array rather than a slice of the BG bank.  P17's piece tiles go
+     * into that same OBJ bank at the first tile the ring does not use, from
+     * their own array and their own count (GFX_SPRITE_COUNT counts only what
+     * the ring upload below reads). */
     set_bkg_data(0, GFX_TILE_COUNT, gfx_tiles);
     set_sprite_data(0, GFX_SPRITE_COUNT, gfx_sprites);
+    set_sprite_data(SPR_PIECE0, GFX_PIECE_SPRITE_COUNT, gfx_piece_sprites);
     set_sprite_tile(SPR_CURSOR, 0);
     set_sprite_tile(SPR_SEL, 0);    /* both rings are the one ring tile */
     put_ring(SPR_CURSOR, NO_SQ);    /* parked at OAM (0, 0) = hidden */
     put_ring(SPR_SEL, NO_SQ);
+    park_glide();                   /* and the glide's four slots, likewise */
     BGP_REG  = 0xE4;                /* 3 2 1 0, darkest to lightest */
     OBP0_REG = 0xE4;
     /* The APU, on - without this the three play_* sounds are silence and
