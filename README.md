@@ -25,7 +25,9 @@ There is no AI opponent yet - both players share the Game Boy (Milestone 2).
 The d-pad is rotated 45 degrees: **UP** and **RIGHT** both go up the screen,
 **DOWN** and **LEFT** both go down, and nothing moves straight sideways. A
 checker's neighbour is diagonal, so each button has to pick one of the four
-diagonals, and this is the one the four buttons cover.
+diagonals, and this is the one the four buttons cover. (Which direction you
+press only matters to the walk, before a piece is picked up. With a piece up,
+any of the four cycles to the next landing square.)
 
     UP    up-left        RIGHT  up-right
     LEFT  down-left      DOWN   down-right
@@ -46,7 +48,9 @@ moves it to the next one and wraps - which key you press makes no difference.
 Two presses of A, picking up and playing, always move a piece.
 
 Mid-chain there is nothing to put back - the capture is already on the board -
-so B does nothing until the chain ends.
+so B does nothing until the chain ends. Before a chain, B drops the piece and
+leaves the cursor on the square it had seated on, so the next A picks that same
+piece up again.
 
 A game ends when the side to move has no legal move: no pieces left, or every
 piece blocked. The status row says who won and START (or B) starts a new game.
