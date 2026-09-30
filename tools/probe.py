@@ -42,6 +42,7 @@ DARK_BG = SHADE[2]              # T_DARK
 
 # --- layout ----------------------------------------------------------------
 MAP0 = 0x9800                   # BG tilemap
+OAM = 0xFE00                    # 40 sprite entries of 4 bytes (y, x, tile, attr)
 MAP_W = 32
 BOARD_TW = BOARD_TH = 16        # tiles; 8x8 cells of 2x2 tiles
 BOARD_TILES = [(x, y) for y in range(BOARD_TH) for x in range(BOARD_TW)]
@@ -110,10 +111,50 @@ class Game:
         """BG tile id at map cell (x, y)."""
         return self.p.memory[MAP0 + y * MAP_W + x]
 
+    def cursor_box(self):
+        """The cursor sprite's 8x8 px box on the screen, or None when it is
+        parked.  OAM y = 0 is the DMG's "hide this sprite" position, which is
+        where it boots (P1 relies on it) and where a y >= 144 or x >= 168
+        parks it too."""
+        y, x = self.p.memory[OAM], self.p.memory[OAM + 1]
+        if y == 0 or y >= 144 or x >= 168:
+            return None
+        return (x, y, x + 8, y + 8)
+
+    def cursor_xy(self):
+        """The cursor sprite's OAM (x, y) -- the raw bytes, in x-then-y order
+        so it reads like a screen coordinate."""
+        return (self.p.memory[OAM + 1], self.p.memory[OAM])
+
+    def visible_sprites(self):
+        """The OAM slots with a sprite on screen.  A DMG hides a sprite by
+        parking it (y = 0 or y >= 144), which is also what an untouched OAM
+        slot looks like."""
+        out = []
+        for i in range(40):
+            y, x = self.p.memory[OAM + 4 * i], self.p.memory[OAM + 4 * i + 1]
+            if 0 < y < 144 and x < 168:
+                out.append(i)
+        return out
+
     def cell_flat(self, sq_row, sq_col, px):
-        """True when every one of a cell's 16x16 rendered pixels is `px`."""
+        """True when every one of a cell's 16x16 rendered pixels is `px`.
+
+        A visible sprite is drawn OVER the background, so the pixels inside
+        the cursor's own 8x8 box are the sprite's, not the tile's.  Those are
+        masked out here rather than read: p3_select_and_highlight owns the
+        cursor and asserts where it is, and every other pixel of the cell is
+        still the BG's."""
         a = self.p.screen.ndarray
-        block = a[16 * sq_row:16 * sq_row + 16, 16 * sq_col:16 * sq_col + 16, 0]
+        x0, y0 = 16 * sq_col, 16 * sq_row
+        block = a[y0:y0 + 16, x0:x0 + 16, 0].copy()
+        box = self.cursor_box()
+        if box:
+            bx0, by0, bx1, by1 = box
+            cx0, cy0 = max(bx0, x0), max(by0, y0)
+            cx1, cy1 = min(bx1, x0 + 16), min(by1, y0 + 16)
+            if cx0 < cx1 and cy0 < cy1:
+                block[cy0 - y0:cy1 - y0, cx0 - x0:cx1 - x0] = px
         return bool((block == px).all())
 
     def px(self, x, y):
@@ -314,15 +355,24 @@ def p2_start_position(g):
     # piece's corners are the bare square showing through and its body is at
     # (5, 5) of the cell, so the rendered screen tells a disc from the crt0
     # font glyph that would otherwise sit behind the same id.
+    #
+    # From P3 the cursor sprite is drawn over the top-left 8x8 of the cell it
+    # sits on, so that one corner pixel is the sprite's and not the art's.
+    # p3_select_and_highlight owns the cursor; this check owns the art, so it
+    # reads the body only on that cell.
+    box = g.cursor_box()
     bad = []
     for (r, c), kind in sorted(kinds.items()):
         if kind is None:
             continue
         body = BLACK_PIECE_PX if kind in (0, 2) else WHITE_PIECE_PX
+        expect = (body, DARK_BG)
         got = (g.px(16 * c + PIECE_ART_PX[0], 16 * r + PIECE_ART_PX[1]),
                g.px(16 * c, 16 * r))
-        if got != (body, DARK_BG):
-            bad.append((r, c, kind, got, (body, DARK_BG)))
+        if box and box[0] <= 16 * c < box[2] and box[1] <= 16 * r < box[3]:
+            got, expect = got[:1], expect[:1]
+        if got != expect:
+            bad.append((r, c, kind, got, expect))
     check(not bad, "every piece cell renders as a disc on the bare square "
                    "(%d off: %r)" % (len(bad), bad[:4]))
 
@@ -336,8 +386,208 @@ def p2_start_position(g):
                           "board 0x%04X (%r)" % (addr, [hex(h) for h in hits]))
 
 
+# ---------------------------------------------------------------- P3 --------
+# main.c's `State` enum, sim.h's NO_SQ, and the move struct (three bytes:
+# from, to, capture - all uint8_t, so no padding to model).
+ST_TITLE, ST_SELECT, ST_TARGET = 0, 1, 2
+NO_SQ = 0xFF
+MOVE_BYTES = 3
+HL_BG = SHADE[1]                # T_DARK_HL is colour 1, so a lit cell is
+                                # LIGHTER than T_DARK's colour 2 -- which is
+                                # what makes "is it really lit" a rendered check.
+
+
+def legal_moves(g):
+    """The game's own move list, read out of WRAM."""
+    a, n = g.addr["moves"], g.var("n_moves")
+    if not n:
+        return []       # PyBoy refuses a zero-length slice, and a broken ROM
+                        # that offers no moves at all has to read as a FAILED
+                        # CHECK, not as a harness error (exit 2 would let the
+                        # driver's power gate pass on a broken build)
+    raw = bytes(g.p.memory[a:a + MOVE_BYTES * n])
+    return [{"from": raw[3 * i], "to": raw[3 * i + 1], "capture": raw[3 * i + 2]}
+            for i in range(n)]
+
+
+def hl_cells(g):
+    """Cells lit up in full."""
+    return sorted((r, c) for r in range(8) for c in range(8)
+                  if g.cell_is(r, c, T_DARK_HL))
+
+
+def hl_partial(g):
+    """Cells with some lit tiles and some not - a highlight painted at the
+    wrong granularity, which no whole-cell check would ever see."""
+    return sorted((r, c) for r in range(8) for c in range(8)
+                  if not g.cell_is(r, c, T_DARK_HL)
+                  and any(g.tile(x, y) == T_DARK_HL for x, y in cells(r, c)))
+
+
+def piece_kinds(g):
+    """{(row, col): kind} for every cell holding a whole piece."""
+    return {(r, c): cell_kind(g, r, c) for r in range(8) for c in range(8)
+            if cell_kind(g, r, c) is not None}
+
+
+def tap(g, buttons, hold=24, settle=14):
+    """Hold a button for a while, then let the screen catch up.
+
+    Both numbers are measured against this ROM, not guessed.  main.c's loop
+    advances ONE iteration per ~8.6 emulator frames: read `frame` over 60
+    emulator frames and it goes up by 7.  (PyBoy's clocks are unfaithful --
+    CLAUDE.md says so and this is what it looks like from here; p1 already hit
+    it, which is why it holds START for 20 frames instead of tapping it.)
+    So a 1-2 frame tap falls between two of the game's samples and is never
+    seen at all; a 24 frame hold is 2-3 samples, which always catches the edge.
+    The second number is the same fact seen from the other side: the tilemap
+    the probe reads is whatever was blitted LAST, so it trails main.c's statics
+    by an iteration -- WRAM is the fresh view, the screen needs settling."""
+    g.run(hold, buttons)
+    g.run(settle)
+
+
+def p3_select_and_highlight(g):
+    """Cursor, two-phase select, destination highlights, B backs out."""
+    print("P3 cursor")
+    g.start()
+    if not g.need("board", "state", "cursor", "sel", "n_moves", "moves"):
+        return
+
+    # --- the sprite ------------------------------------------------------
+    # OAM y = 0 does not mean "top of the screen", it means "hidden", so a
+    # cursor parked there is no cursor at all: this is the phase where the
+    # sprite finally has to be somewhere.
+    x, y = g.cursor_xy()
+    check((x, y) == (16 * sq_col(0), 16 * sq_row(0)),
+          "the cursor sprite is on square 0 = cell(0, 1) = OAM (16, 0) (%r)"
+          % ((x, y),))
+    check(0 <= x <= 127 and 0 <= y <= 127,
+          "its OAM x/y are inside 0..127 (%r)" % ((x, y),))
+    check(g.p.memory[OAM + 2] == 0, "sprite tile 0 is the cursor (%d)"
+          % g.p.memory[OAM + 2])
+    check(g.var("cursor") == 0, "cursor == 0 after START (%d)" % g.var("cursor"))
+    check(g.var("sel") == NO_SQ,
+          "nothing is picked up yet: sel == NO_SQ (%#x)" % g.var("sel"))
+    check(g.var("state") == ST_SELECT,
+          "state is ST_SELECT (%d)" % g.var("state"))
+
+    # Black's whole legal set at the start position is SEVEN moves, all of
+    # them from the row-2 men on squares 8..11.  Squares 0..7 (rows 0-1) are
+    # each blocked by their own rank -- NEIGH says square 0 reaches 4 and 5,
+    # but 4 and 5 hold black men, so square 0 has no move at all.  Counting
+    # NEIGH hops instead of reading gen_moves() is exactly how a check ends up
+    # asserting a move that is not legal.
+    check(g.var("n_moves") == 7,
+          "black's whole legal set at the start position is 7 moves (%d)"
+          % g.var("n_moves"))
+    check(sorted({m["from"] for m in legal_moves(g)}) == [8, 9, 10, 11],
+          "and every one of them is played by a row-2 man (%r)"
+          % (sorted({m["from"] for m in legal_moves(g)}),))
+
+    # --- "selectable" means legal, not mine ------------------------------
+    # Square 0 holds a black man and is NOT selectable, because it has no
+    # legal move.  A cursor that picks up "my man" is the bug this phase
+    # exists to prevent, and A here is where it shows.
+    before = piece_kinds(g)
+    tap(g, "A")
+    check(g.var("sel") == NO_SQ and g.var("state") == ST_SELECT,
+          "A on square 0 does nothing - that man is not in the legal set "
+          "(sel %#x, state %d)" % (g.var("sel"), g.var("state")))
+    check(hl_cells(g) == [], "and lights nothing up (%r)" % (hl_cells(g),))
+    check(piece_kinds(g) == before, "the pieces on screen did not change")
+
+    # --- the walk --------------------------------------------------------
+    # Square 0 is cell(0, 1): NW and NE are both off the board, so a press
+    # has to leave the cursor exactly where it is.
+    g.run(30, "U")
+    g.run(14)
+    check((g.cursor_xy(), g.var("cursor")) == ((16, 0), 0),
+          "holding UP off square 0 leaves the cursor on square 0 (%r, sq %d)"
+          % (g.cursor_xy(), g.var("cursor")))
+    check(hl_cells(g) == [], "and still lights nothing up (%r)" % (hl_cells(g),))
+
+    # A held direction repeats: one step stops on square 5 (itself selectable,
+    # a black man with two empty squares ahead), the next on square 9.  Held
+    # long enough for several of the walk's 8-frame repeat notches to fall
+    # inside the hold, so this does not depend on where the divider lands.
+    g.run(150, "D")
+    g.run(14)
+    check(g.var("cursor") == 9,
+          "holding DOWN walks 0 -> 5 -> 9 (%d)" % g.var("cursor"))
+    check(g.cursor_xy() == (16 * sq_col(9), 16 * sq_row(9)),
+          "and the sprite followed it to cell(2, 3) = OAM (48, 32) (%r)"
+          % (g.cursor_xy(),))
+
+    # --- select ----------------------------------------------------------
+    tap(g, "A")
+    check(g.var("sel") == 9, "A picks up square 9 (%d)" % g.var("sel"))
+    check(g.var("state") == ST_TARGET,
+          "state is ST_TARGET (%d)" % g.var("state"))
+    check(g.var("n_moves") == 2,
+          "the list is now that one piece's 2 moves (%d)" % g.var("n_moves"))
+    hl = hl_cells(g)
+    check(hl == [(3, 2), (3, 4)],
+          "exactly the two destinations light up - sq 13 and sq 14, both in "
+          "row 3 (%r)" % (hl,))
+    check(hl_partial(g) == [], "no cell is half lit (%r)" % (hl_partial(g),))
+    dests = sorted((sq_row(m["to"]), sq_col(m["to"])) for m in legal_moves(g))
+    check(dests == hl, "the lit cells are exactly the move list's m.to - "
+                       "screen and engine agree (%r vs %r)" % (dests, hl))
+    off = [rc for rc in hl if not g.cell_flat(rc[0], rc[1], HL_BG)]
+    check(not off, "a lit cell renders flat in the highlight shade, and is not "
+                   "just the id (%r)" % (off,))
+
+    # --- B backs out -----------------------------------------------------
+    tap(g, "B")
+    check(g.var("sel") == NO_SQ and g.var("state") == ST_SELECT,
+          "B drops the piece (%#x, state %d)"
+          % (g.var("sel"), g.var("state")))
+    check(hl_cells(g) == [], "0 highlights after B (%r)" % (hl_cells(g),))
+    check(g.var("cursor") == 9 and g.cursor_xy() == (48, 32),
+          "the cursor never left the piece it was on - square 9 (%r)"
+          % (g.cursor_xy(),))
+
+    # --- mandatory capture: a piece to move is not a piece to pick --------
+    print("P3 selectable means legal, not mine")
+    # Black's man on 9 can jump; the man on 0 has a perfectly good empty
+    # diagonal ahead of it and still must not be offered, or pickable.
+    blk, wht = (1 << 9) | (1 << 0), (1 << 13) | (1 << 14)
+    a = g.addr["board"]
+    g.p.memory[a:a + 12] = board_bytes(blk, wht, 0)
+    g.run(20)                     # a couple of game iterations, so the screen
+    ms = legal_moves(g)           # has redrawn from the new board too
+    check(len(ms) == 2 and all(m["capture"] != NO_SQ and m["from"] == 9
+                               for m in ms),
+          "with a jump on, the legal set is 9's two jumps and nothing else "
+          "(%r)" % (ms,))
+    check(piece_kinds(g) == {(0, 1): 0, (2, 3): 0, (3, 2): 1, (3, 4): 1},
+          "the screen followed the board write - black men on sq 0 and 9, "
+          "white on sq 13 and 14 (%r)" % (sorted(piece_kinds(g).items()),))
+    g.run(150, "U")
+    check(g.var("cursor") == 9,
+          "walking UP from 9 cannot reach square 0: 9 -NW-> 5 is empty, then 0 "
+          "holds a black man that is not selectable, then the board ends.  A "
+          "walk that lands on 'my man' stops on square 0 (%d)"
+          % g.var("cursor"))
+    tap(g, "A")
+    hl = hl_cells(g)
+    check(g.var("sel") == 9 and g.var("state") == ST_TARGET,
+          "A on 9 picks it up (%d, state %d)"
+          % (g.var("sel"), g.var("state")))
+    check(hl == [(4, 1), (4, 5)],
+          "the two landing squares light up - sq 16 and sq 18, behind the "
+          "jumped men (%r)" % (hl,))
+    check(sorted((sq_row(m["to"]), sq_col(m["to"])) for m in legal_moves(g))
+          == hl, "... and they are the move list's m.to again")
+    check(g.visible_sprites() == [0],
+          "there is exactly one sprite on the screen, the cursor (%r)"
+          % (g.visible_sprites(),))
+
+
 CHECKS = [("p1_boot_title_board", p1_boot_title_board),
-          ("p2_start_position", p2_start_position)]
+          ("p2_start_position", p2_start_position),
+          ("p3_select_and_highlight", p3_select_and_highlight)]
 
 
 def main(rom, mapfile):
