@@ -1126,15 +1126,23 @@ CHECKS = [("p1_boot_title_board", p1_boot_title_board),
 
 
 def main(rom, mapfile):
+    # `fails` counts ASSERTIONS; a check group holds many. Reporting one against
+    # the other printed nonsense like "FAILED: 10 of 8 checks" in the driver's
+    # gate logs, so track the two separately.
+    groups = 0
     for name, fn in CHECKS:
         g = Game(rom, mapfile)
+        before = len(fails)
         try:
             fn(g)
         finally:
             g.p.stop()
+        if len(fails) > before:
+            groups += 1
 
     if fails:
-        print("FAILED: %d of %d checks" % (len(fails), len(CHECKS)))
+        print("FAILED: %d assertions in %d of %d checks"
+              % (len(fails), groups, len(CHECKS)))
         return 1
     print("OK: %d checks passed" % len(CHECKS))
     return 0

@@ -42,8 +42,13 @@ LCCFLAGS = -Wm-ys -Wm-yn"DRAUGHTS" -Wl-m -Wl-j
 
 all: $(ROM)
 
+# The linker always writes a .map, but a release build's map holds globals only
+# -- no Fmain$ statics. Left in place it makes a later probe.py report every
+# static as MISSING, which reads exactly like a broken phase. Delete it, so
+# probing a release ROM fails loudly instead. `sym` writes the real one.
 $(ROM): $(SRCS)
 	$(RUN) $(LCC) $(LCCFLAGS) -o $@ $(CFILES)
+	rm -f $(ROM:.gb=.map)
 
 # -debug so the linker map lists statics too, which is what probe.py reads.
 # NOTE: this overwrites $(ROM) with the debug build, so record the release md5
@@ -74,7 +79,9 @@ geom:
 gfx:
 	python3 mkgfx.py
 
-usage: $(ROM)
+# romusage reads the .map, which only `sym` writes -- so it depends on sym, not
+# on $(ROM).
+usage: sym
 	$(RUN) $(USAGE) $(ROM:.gb=.map) -g
 
 image:
