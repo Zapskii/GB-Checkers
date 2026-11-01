@@ -173,15 +173,13 @@ CHECKERS across the bottom in the same hand as the
 status row, and the discs are the board's own shape (outline, body, groove ring,
 and a cross for kings).
 
-Nothing automated can see it. PyBoy emulates a DMG, where the whole path is
-skipped, and a ROM built without `-Wm-ys` has its SGB packets discarded so mGBA
-emulates a plain DMG too. `make probe` therefore asserts the ROM's bytes (the SGB
-flag, the old-licensee byte, and that the border data is linked in whole), and
-the artwork itself is a check by eye. Two eyeballs have been done: the previous
-artwork rendered in mGBA 0.10.5 on 2026-09-30 with **no SGB BIOS configured**, so
-there is nothing to install first - and this artwork, which replaced it, is the
-one owed. Until it is looked at, what is verified here is bytes and addresses,
-not pixels.
+Two automated checks see it, both outside this repo: `../GB-SGB-Tooling/sgb_border_test.py` boots the ROM in PyBoy 2.8.0+ with SGB
+emulation on and compares the border the SGB receives with `border_data.c`,
+and its `gearboy_check.py` compares what Gearboy draws with the art, pixel for
+pixel. Neither is a real SGB.
+`make probe` still asserts the ROM's bytes (the SGB flag, the old-licensee byte,
+and that the border data is linked in whole), and a ROM built without `-Wm-ys`
+has its SGB packets discarded, so it shows no border anywhere.
 
 ## Not implemented yet (by design, see the plan)
 
@@ -207,7 +205,7 @@ not pixels.
     make probe    # headless PyBoy checks against the built ROM
     make geom     # regenerate board_geom.h from boardgen.py (committed)
     make gfx      # regenerate gfx.h from mkgfx.py (committed)
-    make border   # regenerate border_data.c from the PNG (committed; the PNG
+    make border   # regenerate border_data.c from the PNG (committed; the PNG (needs ../GB-SGB-Tooling)
                   #   itself comes from tools/mkborder.py)
     make usage    # ROM/RAM headroom
     make image    # build the Docker toolchain image (only needed once)
@@ -229,7 +227,7 @@ list the statics the probe reads), so if you want the release binary, run
 | `art/border_sgb.png` | The SGB border artwork (256x224, game area transparent)     |
 | `tools/mkborder.py` | Draws that PNG, lettering included - the border's `mkgfx.py`  |
 | `border_data.c/.h` | Generated from that PNG, committed, like `gfx.h`              |
-| `sgb_border.c/.h`  | Sends the CHR_TRN/PCT_TRN packets; byte-identical to the siblings |
+| `sgb_border.c/.h`  | Sends the CHR_TRN/PCT_TRN packets; from GB-SGB-Tooling, identical in the siblings |
 | `sim.h`            | Pure rules engine (move gen, capture, chains, promotion) and the search; no GBDK |
 | `tests/test_sim.c` | Geometry checks, hand-built positions, and random self-play fuzzing |
 | `tools/probe.py`   | Headless emulator checks: the tilemap, and `main.c`'s own statics |
