@@ -1149,6 +1149,15 @@ void main(void)
                        (unsigned char *)border_data_map, sizeof(border_data_map),
                        (unsigned char *)border_data_palettes,
                        sizeof(border_data_palettes));
+        /* SGB palette 0 colours the game screen. A real SGB starts with a
+         * default, but Gearboy without the SGB boot ROM starts it black, so
+         * set it: the four DMG shades as plain greys (PAL01, from
+         * GB-SGB-Tooling's example/main.c). */
+        static const uint8_t sgb_grey_pal01[16] = {
+            (SGB_PAL_01 << 3) | 1,
+            0xFF, 0x7F, 0x94, 0x52, 0x4A, 0x29, 0x00, 0x00, /* white .. black */
+        };
+        sgb_transfer((uint8_t *)sgb_grey_pal01);
         set_bkg_data(0, GFX_TILE_COUNT, gfx_tiles);
     }
 
