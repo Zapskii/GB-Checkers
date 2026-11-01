@@ -88,6 +88,10 @@ geom:
 gfx:
 	python3 mkgfx.py
 
+# Super Game Boy border packing (slot 0 reserved, limits checked) comes from
+# https://github.com/Zapskii/GB-SGB-Tooling, checked out beside this repo.
+SGB_TOOLING ?= ../GB-SGB-Tooling
+
 # The Super Game Boy border: art/border_sgb.png (256x224; the 160x144 game area
 # at x=48,y=40 is transparent) -> border_data.c/.h, committed like gfx.h so a
 # plain `make` needs no Python.  The PNG is itself generated -- tools/mkborder.py
@@ -100,8 +104,10 @@ gfx:
 # fails.  Regenerating is therefore safe -- the pragma comes from here, not
 # from hand-editing the generated file.
 border:
-	$(RUN) $(P2A) art/border_sgb.png -map -bpp 4 -max_palettes 4 \
+	python3 $(SGB_TOOLING)/mkborder.py .border_packed.png --art art/border_sgb.png
+	$(RUN) $(P2A) .border_packed.png -map -bpp 4 -max_palettes 3 -keep_palette_order \
 	      -pack_mode sgb -use_map_attributes -b 1 -c border_data.c
+	rm -f .border_packed.png
 
 # romusage reads the .map, which only `sym` writes -- so it depends on sym, not
 # on $(ROM).
