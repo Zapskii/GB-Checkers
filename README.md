@@ -1,3 +1,5 @@
+[Play online at retro.zapski.com](https://retro.zapski.com)
+
 # GB-Draughts
 
 English draughts (checkers) for the Game Boy (DMG), written in GBDK-2020 C
