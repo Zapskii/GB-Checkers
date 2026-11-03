@@ -346,8 +346,10 @@ static int16_t search_best(Board b, uint8_t side, uint8_t depth,
                 return f->best;
             }
             {
+                /* a chain hop is the same side moving again: no negation */
                 AiFrame *p = &arena[ply - 1u];
-                ai_fold(p, (uint8_t)(ply - 1u), (int16_t)(-f->best), f->entry);
+                ai_fold(p, (uint8_t)(ply - 1u),
+                        p->side == f->side ? f->best : (int16_t)(-f->best), f->entry);
                 ply--;
             }
             continue;
@@ -380,15 +382,16 @@ static int16_t search_best(Board b, uint8_t side, uint8_t depth,
             c->depth_left = (uint8_t)(f->depth_left - 1u);
             c->index = 0;
             c->best = (int16_t)-AI_INF;
-            c->alpha = (int16_t)(-f->beta);
-            c->beta  = (int16_t)(-f->alpha);
+            if (cside == f->side) { c->alpha = f->alpha; c->beta = f->beta; }
+            else { c->alpha = (int16_t)(-f->beta); c->beta = (int16_t)(-f->alpha); }
 
             if (c->n == 0u) {
                 /* Handed the move with nothing to play: a loss, and one
                  * found nearer the root is worse, so subtract the ply. */
                 ai_fold(f, ply, (int16_t)(AI_WIN_SCORE - (int16_t)(ply + 1u)), m);
             } else if (c->depth_left == 0u) {
-                ai_fold(f, ply, (int16_t)(-evaluate(&child, cside)), m);
+                int16_t e = evaluate(&child, cside);
+                ai_fold(f, ply, cside == f->side ? e : (int16_t)(-e), m);
             } else {
                 ply++;                                       /* descend */
             }

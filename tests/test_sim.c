@@ -389,6 +389,36 @@ static void test_search_takes_the_king(void)
     }
 }
 
+/* A chain hop is the SAME side moving again, so its value must not be
+ * negated on the way up. White's man 21 can jump 17 then 10 (two men);
+ * man 30 can jump 26 (one man, and 17 then recaptures 21). Offered second,
+ * so moves[0] is not a passing answer. Negating the chain node scores the
+ * double jump as a disaster and picks 30x26. Ported from GBA-Checkers. */
+static void test_search_values_the_double_jump(void)
+{
+    Board b = empty_board();
+    Move mv[MAX_MOVES], out;
+    uint8_t n, d;
+
+    put(&b, 0, SIDE_BLACK, 0);
+    put(&b, 10, SIDE_BLACK, 0);
+    put(&b, 17, SIDE_BLACK, 0);
+    put(&b, 26, SIDE_BLACK, 0);
+    put(&b, 21, SIDE_WHITE, 0);
+    put(&b, 30, SIDE_WHITE, 0);
+    put(&b, 28, SIDE_WHITE, 0);      /* spare men: the double jump ends +200, */
+    put(&b, 29, SIDE_WHITE, 0);      /* so negating it is visible             */
+
+    n = gen_moves(&b, SIDE_WHITE, mv);
+    CHECK(n == 2);
+    CHECK(same_move(mv[0], mv_of(21, 14, 17)));
+    CHECK(same_move(mv[1], mv_of(30, 23, 26)));
+    for (d = 2; d <= 4; d++) {
+        search_best(b, SIDE_WHITE, d, arena, &out);
+        CHECK(same_move(out, mv_of(21, 14, 17)));
+    }
+}
+
 /* An out-move is only ever written when there is a move to write. */
 static void test_search_no_moves_leaves_out_alone(void)
 {
@@ -533,6 +563,7 @@ int main(void)
     test_search_scores_material();
     test_search_prefers_the_two_for_one();
     test_search_takes_the_king();
+    test_search_values_the_double_jump();
     test_search_no_moves_leaves_out_alone();
     test_search_depth_zero_leaves_out_alone();
     test_search_stays_legal();
