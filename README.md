@@ -1,4 +1,4 @@
-[Play online at retro.zapski.com](https://retro.zapski.com)
+🎮 [Play online](https://retro.zapski.com/play/checkers) · 📖 [Read the review](https://retro.zapski.com/blog/checker-draughts-game-boy-review) · [retro.zapski.com](https://retro.zapski.com)
 
 # GB-Draughts
 
